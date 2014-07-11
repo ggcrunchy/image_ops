@@ -67,6 +67,15 @@ local function ReadHeader (str, pos)
 	return w, h, nbits, ctype
 end
 
+--
+local function AuxInfo (str)
+	if sub(str, 1, 8) == Signature and sub(str, 13, 16) == "IHDR" then
+		return true, ReadHeader(str, 17)
+	end
+
+	return false
+end
+
 --- DOCME
 function M.GetInfo (name)
 	local png = open(name, "rb")
@@ -76,13 +85,14 @@ function M.GetInfo (name)
 
 		png:close()
 
-		if sub(str, 1, 8) == Signature and sub(str, 13, 16) == "IHDR" then
-			return true, ReadHeader(str, 17)
-		end
+		return AuxInfo(str)
 	end
 
 	return false
 end
+
+--- DOCME
+M.GetInfoString = AuxInfo
 
 --
 local function DecodePalette (palette, yfunc)
