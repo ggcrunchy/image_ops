@@ -39,10 +39,10 @@ From the original:
 -- Standard library imports --
 local assert = assert
 local byte = string.byte
-local max = math.max
 local min = math.min
 
 -- Modules --
+local huffman = require("image_ops.huffman")
 local lut = require("image_ops.zlib_lut")
 local operators = require("bitwise_ops.operators")
 
@@ -53,61 +53,6 @@ local rshift = operators.rshift
 
 -- Exports --
 local M = {}
-
--- --
-local Lengths = {}
-
---
-local function GenHuffmanTable (codes, from, yfunc, n)
-	-- Find max code length, culling 0 lengths as an optimization.
-	local max_len, nlens = 0, 0
-
-	for i = 1, n do
-		local len = from[i]
-
-		if len > 0 then
-			Lengths[nlens + 1] = i - 1
-			Lengths[nlens + 2] = len
-
-			max_len, nlens = max(len, max_len), nlens + 2
-		end
-	end
-
-	-- Build the table.
-	local code, skip, cword, size = 0, 2, 2^16, 2^max_len
-
-	codes.max_len, codes.size = max_len, size
-
-	for i = 1, max_len do
-		for j = 1, nlens, 2 do
-			if i == Lengths[j + 1] then
-				-- Bit-reverse the code.
-				local code2, t = 0, code
-
-				for _ = 1, i do
-					local bit = t % 2
-
-					code2, t = 2 * code2 + bit, (t - bit) / 2
-				end
-
-				-- Fill the table entries.
-				local entry = cword + Lengths[j]
-
-				for k = code2 + 1, size, skip do
-					codes[k] = entry
-				end
-
-				code = code + 1
-
-				yfunc()
-			end
-		end
-
-		code, skip, cword = 2 * code, 2 * skip, cword + 2^16
-	end
-
-	return codes
-end
 
 --
 local function AuxGet (FS, n, buf, size)
@@ -205,7 +150,7 @@ local function Compressed (FS, fixed_codes, yfunc)
 			clc_lens[map[i] + 1] = 0
 		end
 
-		GenHuffmanTable(clc_tab, clc_lens, yfunc, n)
+		huffman.GenCodes(clc_tab, clc_lens, n, yfunc)
 
 		-- Build the literal and distance code tables.
 		local i, len, codes, code_lens = 1, 0, num_lit_codes + num_dist_codes, LHT
@@ -229,8 +174,8 @@ local function Compressed (FS, fixed_codes, yfunc)
 		local _, lj = Slice(code_lens, 1, num_lit_codes, LitSlice)
 		local _, dj = Slice(code_lens, num_lit_codes + 1, codes, DistSlice)
 
-		GenHuffmanTable(LHT, LitSlice, yfunc, lj)
-		GenHuffmanTable(DHT, DistSlice, yfunc, dj)
+		huffman.GenCodes(LHT, LitSlice, lj, yfunc)
+		huffman.GenCodes(DHT, DistSlice, dj, yfunc)
 
 		return LHT, DHT
 	end

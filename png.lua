@@ -32,27 +32,19 @@ local byte = string.byte
 local concat = table.concat
 local floor = math.floor
 local min = math.min
-local open = io.open
 local sub = string.sub
 local unpack = unpack
 
 -- Modules --
+local image_utils = require("image_ops.utils")
 local zlib = require("image_ops.zlib")
+
+-- Imports --
+local ReadU32 = image_utils.ReadU32
+local Sub = image_utils.Sub
 
 -- Exports --
 local M = {}
-
---
-local function Sub (str, pos, n)
-	return sub(str, pos, pos + n - 1)
-end
-
--- Reads out four bytes as an integer
-local function ReadU32 (png, pos)
-	local a, b, c, d = byte(png, pos, pos + 3)
-
-	return a * 2^24 + b * 2^16 + c * 2^8 + d
-end
 
 -- --
 local Signature = "\137\080\078\071\013\010\026\010"
@@ -78,17 +70,7 @@ end
 
 --- DOCME
 function M.GetInfo (name)
-	local png = open(name, "rb")
-
-	if png then
-		local str = png:read(24)
-
-		png:close()
-
-		return AuxInfo(str)
-	end
-
-	return false
+	return image_utils.ReadHeader(name, 24, AuxInfo)
 end
 
 --- DOCME
@@ -183,7 +165,7 @@ local DecodeAlgorithm = {
 }
 
 --
-local function DecodePixels (data, bit_len, w, h, yfunc)
+local function DecodePixels (data, bit_len, w, yfunc)
 	if #data == 0 then
 		return {}
 	end
@@ -222,7 +204,7 @@ local function DecodePixels (data, bit_len, w, h, yfunc)
 		yfunc()
 	end
 
-	for i = 1, nscan - rw do
+	for _ = 1, nscan - rw do
 		pixels[wpos], wpos = 0, wpos + 1
 	end
 
@@ -284,17 +266,14 @@ local function DefRowFunc () end
 local function DefYieldFunc () end
 
 --
-local ShouldDecode = { get_pixels = true, for_each = true, for_each_in_column = true, for_each_in_row = true }
-
---
 local function AuxLoad (png, yfunc)
-	local bits, bit_len, colors, color_type, data, has_alpha, palette, w, h
+	local bits, bit_len, colors, color_type, has_alpha, palette, w, h
 
 	assert(sub(png, 1, 8) == Signature, "Image is not a PNG")
 
 	yfunc = yfunc or DefYieldFunc
 
-	local pos, total = 9, #png
+	local pos, total, pixels, data = 9, #png
 
 	while true do
 		local size = ReadU32(png, pos)
@@ -343,94 +322,87 @@ local function AuxLoad (png, yfunc)
 	end
 
 	--
-	local pixels
+	local function Decode ()
+		local decoded = DecodePixels(data, bit_len, w, yfunc)
 
-	return function(what, arg1, arg2, arg3)
-		-- Check first for any messages that rely on decoded data. If so, decode it on the first
-		-- such call, before processing the message proper.
-		local should_decode = ShouldDecode[what]
+		decoded, data = CopyToImageData(decoded, colors, has_alpha, palette, w * h * 4, yfunc)
 
-		if should_decode then
-			if not pixels then
-				local decoded = DecodePixels(data, bit_len, w, h, yfunc)
+		return decoded
+	end
 
-				pixels, data = pixels or CopyToImageData(decoded, colors, has_alpha, palette, w * h * 4, yfunc)
+	--
+	local PNG = {}
+
+	--- DOCME
+	function PNG:ForEach (func, on_row, arg)
+		pixels = pixels or Decode()
+		on_row = on_row or DefRowFunc
+
+		local i = 1
+
+		for y = 1, h do
+			for x = 1, w do
+				func(x, y, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i, arg)
+
+				i = i + 4
 			end
 
-			-- Get Pixels --
-			if what == "get_pixels" then
-				return pixels
-
-			-- For Each --
-			-- arg1: Callback
-			-- arg2: Row callback (optional)
-			elseif what == "for_each" then
-				local i, on_row = 1, arg2 or DefRowFunc
-
-				for y = 1, h do
-					for x = 1, w do
-						arg1(x, y, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i)
-
-						i = i + 4
-					end
-
-					on_row(y)
-				end
-
-			-- For Each In Column --
-			-- arg1: Callback
-			-- arg2: Column index
-			elseif what == "for_each_in_column" then
-				local i, stride = (arg3 - 1) * 4 + 1, w * 4
-
-				for y = 1, h do
-					arg1(arg3, y, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i)
-
-					i = i + stride
-				end
-
-			-- For Each In Row --
-			-- arg1: Callback
-			-- arg2: Row index
-			elseif what == "for_each_in_row" then
-				local i = (arg2 - 1) * w * 4 + 1
-
-				for x = 1, w do
-					arg1(x, arg2, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i)
-
-					i = i + 4
-				end
-			end
-
-		-- Get Dimensions --
-		elseif what == "get_dims" then
-			return w, h
-
-		-- Set Yield Func --
-		-- arg1: Yield function
-		elseif what == "set_yield_func" then
-			yfunc = arg1 or DefYieldFunc
-
-		-- NYI --
-		else
-			-- get frame, set frame, has alpha, etc.
+			on_row(y, arg)
 		end
 	end
+
+	--- DOCME
+	function PNG:ForEachInColumn (func, col, arg)
+		pixels = pixels or Decode()
+
+		local i, stride = (col - 1) * 4 + 1, w * 4
+
+		for y = 1, h do
+			func(col, y, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i, arg)
+
+			i = i + stride
+		end
+	end
+
+	--- DOCME
+	function PNG:ForEachInRow (func, row, arg)
+		pixels = pixels or Decode()
+
+		local i = (row - 1) * w * 4 + 1
+
+		for x = 1, w do
+			func(x, row, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i, arg)
+
+			i = i + 4
+		end
+	end
+
+	--- DOCME
+	function PNG:GetDims ()
+		return w, h
+	end
+
+	--- DOCME
+	function PNG:GetPixels ()
+		pixels = pixels or Decode()
+
+		return pixels
+	end
+
+	--- DOCME
+	function PNG:SetYieldFunc (func)
+		yfunc = func or DefYieldFunc
+	end
+
+	-- NYI --
+	-- get frame, set frame, has alpha, etc.
+
+	return PNG
 end
 
 --- DOCME
 function M.Load (name, yfunc)
-	local png = open(name, "rb")
-
-	if png then
-		local contents = png:read("*a")
-
-		png:close()
-
-		return AuxLoad(contents, yfunc)
-	end
-
-	return nil
+	return image_utils.Load(name, AuxLoad, yfunc)
 end
 
 --- DOCME

@@ -40,21 +40,21 @@ local function LoadRow (x, _, r, g, b, a)
 end
 
 -- Common two-rows energy computation
-local function AuxTwoRows (r1, g1, b1, a1, r2, g2, b2, a2, other, i)
+local function AuxTwoRows (r1, g1, b1, a1, r2, g2, b2, a2, other, i, metric)
 	local ro, go, bo, ao = other[i], other[i + 1], other[i + 2], other[i + 3]
-	local hgrad = (r2 - r1)^2 + (g2 - g1)^2 + (b2 - b1)^2 + (a2 - a1)^2
-	local vgrad = (r1 - ro)^2 + (g1 - go)^2 + (b1 - bo)^2 + (a1 - ao)^2
+	local hgrad = metric(r2 - r1, g2 - g1, b2 - b1, a2 - a1)
+	local vgrad = metric(r1 - ro, g1 - go, b1 - bo, a1 - ao)
 
 	return hgrad + vgrad
 end
 
 -- One-sided energy computations, i.e. a current row and one other
-local function TwoRowsEnergy (energy, i, cur, other, w)
+local function TwoRowsEnergy (energy, i, cur, other, w, metric)
 	-- Leftmost pixel.
 	local r1, g1, b1, a1 = cur[1], cur[2], cur[3], cur[4]
 	local r2, g2, b2, a2 = cur[5], cur[6], cur[7], cur[8]
 
-	energy[i], i = AuxTwoRows(r1, g1, b1, a1, r2, g2, b2, a2, other, 1), i + 1
+	energy[i], i = AuxTwoRows(r1, g1, b1, a1, r2, g2, b2, a2, other, 1, metric), i + 1
 
 	-- Interior pixels.
 	local j, r3, g3, b3, a3 = 5
@@ -62,33 +62,33 @@ local function TwoRowsEnergy (energy, i, cur, other, w)
 	for _ = 2, w - 1 do
 		r3, g3, b3, a3 = cur[j + 4], cur[j + 5], cur[j + 6], cur[j + 7]
 
-		energy[i], i, j = AuxTwoRows(r1, g1, b1, a1, r3, g3, b3, a3, other, j), i + 1, j + 4
+		energy[i], i, j = AuxTwoRows(r1, g1, b1, a1, r3, g3, b3, a3, other, j, metric), i + 1, j + 4
 
 		r1, g1, b1, a1 = r2, g2, b2, a2
 		r2, g2, b2, a2 = r3, g3, b3, a3
 	end
 
 	-- Rightmost pixel.
-	energy[i] = AuxTwoRows(r1, g1, b1, a1, r2, g2, b2, a2, other, j)
+	energy[i] = AuxTwoRows(r1, g1, b1, a1, r2, g2, b2, a2, other, j, metric)
 end
 
 -- Common interior energy computation
-local function AuxInterior (r1, g1, b1, a1, r2, g2, b2, a2, i)
+local function AuxInterior (r1, g1, b1, a1, r2, g2, b2, a2, i, metric)
 	local rp, gp, bp, ap = Prev[i], Prev[i + 1], Prev[i + 2], Prev[i + 3]
 	local rn, gn, bn, an = Next[i], Next[i + 1], Next[i + 2], Next[i + 3]	
-	local hgrad = (r2 - r1)^2 + (g2 - g1)^2 + (b2 - b1)^2 + (a2 - a1)^2
-	local vgrad = (rn - rp)^2 + (gn - gp)^2 + (bn - bp)^2 + (an - ap)^2
+	local hgrad = metric(r2 - r1, g2 - g1, b2 - b1, a2 - a1)
+	local vgrad = metric(rn - rp, gn - gp, bn - bp, an - ap)
 
 	return hgrad + vgrad
 end
 
 -- Two-sided energy computation, i.e. a previous, current, and next row
-local function InteriorRowEnergy (energy, i, w)
+local function InteriorRowEnergy (energy, i, w, metric)
 	-- Leftmost pixel.
 	local r1, g1, b1, a1 = This[1], This[2], This[3], This[4]
 	local r2, g2, b2, a2 = This[5], This[6], This[7], This[8]
 
-	energy[i], i = AuxInterior(r1, g1, b1, a1, r2, g2, b2, a2, 1), i + 1
+	energy[i], i = AuxInterior(r1, g1, b1, a1, r2, g2, b2, a2, 1, metric), i + 1
 
 	-- Interior pixels.
 	local j, r3, g3, b3, a3 = 5
@@ -96,14 +96,19 @@ local function InteriorRowEnergy (energy, i, w)
 	for _ = 2, w - 1 do
 		r3, g3, b3, a3 = This[j + 4], This[j + 5], This[j + 6], This[j + 7]
 
-		energy[i], i, j = AuxInterior(r1, g1, b1, a1, r3, g3, b3, a3, j), i + 1, j + 4
+		energy[i], i, j = AuxInterior(r1, g1, b1, a1, r3, g3, b3, a3, j, metric), i + 1, j + 4
 
 		r1, g1, b1, a1 = r2, g2, b2, a2
 		r2, g2, b2, a2 = r3, g3, b3, a3
 	end
 
 	-- Rightmost pixel.
-	energy[i] = AuxInterior(r1, g1, b1, a1, r2, g2, b2, a2, j)
+	energy[i] = AuxInterior(r1, g1, b1, a1, r2, g2, b2, a2, j, metric)
+end
+
+-- Euclidean length-squared metric
+local function EuclideanLenSq (dr, dg, db, da)
+	return dr^2 + dg^2 + db^2 + da^2
 end
 
 -- Default yield function: no-op
@@ -113,26 +118,26 @@ local DefYieldFunc = function() end
 --
 -- Currently, this is a gradient energy metric, with values being integers &isin; [0, 512K).
 -- @array energy Matrix, of size _w_ * _h_, which will receive the energy values.
--- @callable func Called to supply color information, cf. **"for\_each"** and related
--- options from @{image_ops.png.Load}'s result.
--- @uint w Width of energy matrix (and implicitly, _func_'s image)...
--- @uint h ...and height.
+-- @ptable image Image object, e.g. as returned by @{image_ops.png.Load}.
 -- @callable[opt] yfunc Yield function, called periodically during the computation (no
 -- arguments), e.g. to yield within a coroutine. If absent, a no-op.
-function M.ComputeEnergy (energy, func, w, h, yfunc)
+function M.ComputeEnergy (energy, image, yfunc)
 	yfunc = yfunc or DefYieldFunc
+
+	-- Configure the requested metric.
+	local metric, w, h = EuclideanLenSq, image:GetDims()
 
 	-- Calculate the first row (in the process getting the first interior row ready), which has
 	-- a one-sided (previous -> current) vertical gradient.
-	func("for_each_in_row", LoadRow, 1)
+	image:ForEachInRow(LoadRow, 1)
 
 	Prev, Next = Next, Prev
 
-	func("for_each_in_row", LoadRow, 2)
+	image:ForEachInRow(LoadRow, 2)
 
 	This, Next = Next, This
 
-	TwoRowsEnergy(energy, 1, Prev, This, w)
+	TwoRowsEnergy(energy, 1, Prev, This, w, metric)
 
 	yfunc()
 
@@ -140,9 +145,9 @@ function M.ComputeEnergy (energy, func, w, h, yfunc)
 	local index = w + 1
 
 	for row = 2, h - 1 do
-		func("for_each_in_row", LoadRow, row + 1)
+		image:ForEachInRow(LoadRow, row + 1)
 
-		InteriorRowEnergy(energy, index, w)
+		InteriorRowEnergy(energy, index, w, metric)
 
 		yfunc()
 
@@ -150,13 +155,13 @@ function M.ComputeEnergy (energy, func, w, h, yfunc)
 	end
 
 	-- Calculate the final row, again a one-sided (previous -> current) gradient.
-	TwoRowsEnergy(energy, index, This, Prev, w)
+	TwoRowsEnergy(energy, index, This, Prev, w, metric)
 
 	yfunc()
 end
 
 --- Converts an energy sample, as found by @{ComputeEnergy}, to a gray value.
--- @uint energy
+-- @number energy
 -- @treturn number Gray value, &isin; [0, 1].
 -- @todo Figure out how to generalize this, when more variety is available.
 function M.ToGray (energy)
