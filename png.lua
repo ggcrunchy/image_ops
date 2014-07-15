@@ -50,27 +50,28 @@ local M = {}
 local Signature = "\137\080\078\071\013\010\026\010"
 
 --
-local function ReadHeader (str, pos)
+local function ReadHeader (str, pos, get_data)
 	local w = ReadU32(str, pos)
 	local h = ReadU32(str, pos + 4)
-	local nbits = byte(str, pos + 8)
-	local ctype = byte(str, pos + 9)
 
-	return w, h, nbits, ctype
+	return w, h, get_data and {
+		nbits = byte(str, pos + 8),
+		ctype = byte(str, pos + 9)
+	}
 end
 
 --
-local function AuxInfo (str)
+local function AuxInfo (str, get_data)
 	if sub(str, 1, 8) == Signature and sub(str, 13, 16) == "IHDR" then
-		return true, ReadHeader(str, 17)
+		return true, ReadHeader(str, 17, get_data)
 	end
 
 	return false
 end
 
 --- DOCME
-function M.GetInfo (name)
-	return image_utils.ReadHeader(name, 24, AuxInfo)
+function M.GetInfo (name, get_data)
+	return image_utils.ReadHeader(name, 24, AuxInfo, get_data)
 end
 
 --- DOCME

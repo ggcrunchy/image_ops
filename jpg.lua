@@ -37,28 +37,42 @@ local ReadU16 = image_utils.ReadU16
 -- Exports --
 local M = {}
 
+-- --
+local Component = { "Y", "Cb", "Cr", "I", "Q" }
+
 --
-local function ReadHeader (str, pos)
+local function ReadHeader (str, pos, get_data)
 	while true do
 		if byte(str, pos) ~= 0xFF then
 			return false
 		else
 			local code = byte(str, pos + 1)
 
+			-- Start Of Frame --
 			if code == 0xC0 or code == 0xC1 then
+				local nbits, data = byte(str, pos + 4)
 				local h = ReadU16(str, pos + 5)
 				local w = ReadU16(str, pos + 7)
-				local ncomps = byte(str, pos + 9)
-				local nr, ng, nb = byte(str, pos + 10)
 
-				if ncomps == 3 then
-					ng = byte(str, pos + 11)
-					nb = byte(str, pos + 12)
-				else
-					ng, nb = 0, 0
+				if get_data then
+					data, pos = { nbits = nbits }, pos + 9
+
+					for i = 1, byte(str, pos) * 3, 3 do
+						local factors = byte(str, pos + i + 1)
+						local vert = factors % 16
+
+						data[#data + 1] = {
+							id = Component[byte(str, pos + i)],
+							horz_samp_factor = .125 * (factors - vert),
+							vert_samp_factor = vert,
+							quantization_table = byte(str, pos + i + 2)
+						}
+					end
 				end
 
-				return true, w, h, ncomps, nr, ng, nb
+				return true, w, h, data
+
+			-- End Of Image --
 			elseif code == 0xD9 then
 				return false
 			end
@@ -69,21 +83,30 @@ local function ReadHeader (str, pos)
 end
 
 --
-local function AuxInfo (str)
+local function AuxInfo (str, get_data)
 	if sub(str, 1, 2) == char(0xFF, 0xD8) then
-		return ReadHeader(str, 3)
+		return ReadHeader(str, 3, get_data)
 	end
 
 	return false
 end
 
 --- DOCME
-function M.GetInfo (name)
-	return image_utils.ReadHeader(name, "*a", AuxInfo)
+function M.GetInfo (name, get_data)
+	return image_utils.ReadHeader(name, "*a", AuxInfo, get_data)
 end
 
 --- DOCME
 M.GetInfoString = AuxInfo
+
+--[[
+	Decoding:
+
+	http://en.wikipedia.org/wiki/JPEG
+	http://kd5col.info/swag/GRAPHICS/0143.PAS.html
+	http://vip.sugovica.hu/Sardi/kepnezo/JPEG%20File%20Layout%20and%20Format.htm
+	http://www.xbdev.net/image_formats/jpeg/tut_jpg/jpeg_file_layout.php
+]]
 
 -- Export the module.
 return M

@@ -45,11 +45,11 @@ local function GetContents (name, read)
 end
 
 --- DOCME
-function M.ReadHeader (name, nread, read)
+function M.ReadHeader (name, nread, read, get_data)
 	local str = GetContents(name, nread)
 
 	if str then
-		return read(str)
+		return read(str, get_data)
 	else
 		return false
 	end
