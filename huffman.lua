@@ -75,7 +75,7 @@ function M.GenCodes (codes, from, n, yfunc)
 				for _ = 1, i do
 					local bit = t % 2
 
-					code2, t = 2 * code2 + bit, (t - bit) / 2
+					code2, t = 2 * code2 + bit, .5 * (t - bit)
 				end
 
 				-- Fill the table entries.

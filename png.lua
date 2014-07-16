@@ -132,7 +132,7 @@ local DecodeAlgorithm = {
 		if roff >= 0 then
 			local col, imod = GetCol(i, pixel_bytes)
 
-			return floor((left + GetUpper(pixels, imod, pixel_bytes, roff, col)) / 2)
+			return floor(.5 * (left + GetUpper(pixels, imod, pixel_bytes, roff, col)))
 		else
 			return left
 		end
@@ -166,14 +166,14 @@ local DecodeAlgorithm = {
 }
 
 --
-local function DecodePixels (data, bit_len, w, yfunc)
+local function DecodePixels (data, state, w, yfunc)
 	if #data == 0 then
 		return {}
 	end
 
 	data = zlib.NewFlateStream(data):GetBytes(yfunc and { yfunc = yfunc })
 
-	local pixels, nbytes = {}, bit_len / 8
+	local pixels, nbytes = {}, state.bit_len / 8
 	local nscan, wpos, n = nbytes * w, 1, #data
 	local roff, rw = -nscan
 
@@ -215,7 +215,7 @@ end
 --
 local function GetIndex (pixels, palette, i, j)
 	if palette then
-		return pixels[(i - 1) / 4 + 1] * 4 + 1
+		return pixels[.25 * (i - 1) + 1] * 4 + 1
 	else
 		return j
 	end
@@ -229,27 +229,27 @@ local function GetColor1 (input, i, j)
 end
 
 --
-local function CopyToImageData (pixels, colors, has_alpha, palette, n, yfunc)
+local function CopyToImageData (pixels, state, n, yfunc)
 	local data, input = {}
 
-	if palette then
-		palette, colors, has_alpha = DecodePalette(palette), 4, true
+	if state.palette then
+		state.palette, state.colors, state.has_alpha = DecodePalette(state.palette), 4, true
 
-		input = palette
+		input = state.palette
 	else
 		input = pixels
 	end
 
-	local j, extra, count, get_color = 1, has_alpha and 1 or 0
+	local j, extra, count, get_color = 1, state.has_alpha and 1 or 0
 
-	if colors == 1 then
+	if state.colors == 1 then
 		count, get_color = 1 + extra, GetColor1
 	else
 		count, get_color = 3 + extra, unpack
 	end
 
 	for i = 1, n, 4 do
-		local k = GetIndex(pixels, palette, i, j)
+		local k = GetIndex(pixels, state.palette, i, j)
 		local r, g, b, alpha = get_color(input, k, k + count - 1)
 
 		data[i], data[i + 1], data[i + 2], data[i + 3], j = r, g, b, alpha or 255, k + count
@@ -260,15 +260,12 @@ local function CopyToImageData (pixels, colors, has_alpha, palette, n, yfunc)
 	return data
 end
 
---
-local function DefRowFunc () end
-
 -- Default yield function: no-op
 local function DefYieldFunc () end
 
 --
 local function AuxLoad (png, yfunc)
-	local bits, bit_len, colors, color_type, has_alpha, palette, w, h
+	local state, w, h
 
 	assert(sub(png, 1, 8) == Signature, "Image is not a PNG")
 
@@ -284,13 +281,13 @@ local function AuxLoad (png, yfunc)
 
 		-- Image Header --
 		if code == "IHDR" then
-			w, h, bits, color_type = ReadHeader(png, pos)
+			w, h, state = ReadHeader(png, pos, true)
 
 			-- compression, filter, interlace methods
 
 		-- Palette --
 		elseif code == "PLTE" then
-			palette = Sub(png, pos, size)
+			state.palette = Sub(png, pos, size)
 
 		-- Image Data --
 		elseif code == "IDAT" then
@@ -302,15 +299,17 @@ local function AuxLoad (png, yfunc)
 		elseif code == "IEND" then
 			data = concat(data, "")
 
+			local color_type = state.ctype
+
 			if color_type == 0 or color_type == 3 or color_type == 4 then
-				colors = 1
+				state.colors = 1
 			elseif color_type == 2 or color_type == 6 then
-				colors = 3
+				state.colors = 3
 			end
 
-			has_alpha = color_type == 4 or color_type == 6
-			colors = colors + (has_alpha and 1 or 0)
-			bit_len = bits * colors
+			state.has_alpha = color_type == 4 or color_type == 6
+			state.colors = state.colors + (state.has_alpha and 1 or 0)
+			state.bit_len = state.nbits * state.colors
 			
 			-- color space = (colors == 1): "gray" / (colors == 3) : "rgb"
 
@@ -324,9 +323,9 @@ local function AuxLoad (png, yfunc)
 
 	--
 	local function Decode ()
-		local decoded = DecodePixels(data, bit_len, w, yfunc)
+		local decoded = DecodePixels(data, state, w, yfunc)
 
-		decoded, data = CopyToImageData(decoded, colors, has_alpha, palette, w * h * 4, yfunc)
+		decoded, data = CopyToImageData(decoded, state, w * h * 4, yfunc)
 
 		return decoded
 	end
@@ -335,47 +334,31 @@ local function AuxLoad (png, yfunc)
 	local PNG = {}
 
 	--- DOCME
-	function PNG:ForEach (func, on_row, arg)
+	function PNG:ForEach (func, arg)
 		pixels = pixels or Decode()
-		on_row = on_row or DefRowFunc
 
-		local i = 1
+		image_utils.ForEach(pixels, w, h, func, nil, arg)
+	end
 
-		for y = 1, h do
-			for x = 1, w do
-				func(x, y, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i, arg)
+	--- DOCME
+	function PNG:ForEach_OnRow (func, on_row, arg)
+		pixels = pixels or Decode()
 
-				i = i + 4
-			end
-
-			on_row(y, arg)
-		end
+		image_utils.ForEach(pixels, w, h, func, on_row, arg)
 	end
 
 	--- DOCME
 	function PNG:ForEachInColumn (func, col, arg)
 		pixels = pixels or Decode()
 
-		local i, stride = (col - 1) * 4 + 1, w * 4
-
-		for y = 1, h do
-			func(col, y, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i, arg)
-
-			i = i + stride
-		end
+		image_utils.ForEachInColumn(pixels, w, h, func, col, arg)
 	end
 
 	--- DOCME
 	function PNG:ForEachInRow (func, row, arg)
 		pixels = pixels or Decode()
 
-		local i = (row - 1) * w * 4 + 1
-
-		for x = 1, w do
-			func(x, row, pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3], i, arg)
-
-			i = i + 4
-		end
+		image_utils.ForEachInRow(pixels, w, func, row, arg)
 	end
 
 	--- DOCME

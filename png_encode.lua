@@ -205,7 +205,7 @@ local function CreateCRCTable ()
 		for _ = 1, 8 do
 			local bit = band(c, 0x1)
 
-			c = (c - bit) / 2
+			c = .5 * (c - bit)
 
 			if bit ~= 0 then
 				c = bxor(c, 0xEDB88320)
