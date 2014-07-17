@@ -231,14 +231,6 @@ function M.SaveByteStream (byte_stream, into)
 end
 
 --- DOCME
-function M.GetBits (byte_stream, bits)
-	local buf, size, bsize = byte_stream.m_code_buf, byte_stream.m_code_size, 2^bits
-
-
-
-end
-
---- DOCME
 function M.Sub (stream, pos, n)
 	return sub(stream, pos, pos + n - 1)
 end

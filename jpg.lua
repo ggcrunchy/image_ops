@@ -120,9 +120,35 @@ local function DefYieldFunc () end
 -- --
 local Stream, State = {}, {}
 
+--
+local function FindCode (nbits, codes, n)
+	local bits = image_utils.GetBits(Stream, nbits)
+
+	for i = 1, n do
+		if bits == codes[i] then
+			return bits
+		end
+	end
+end
+
 -- --
 local function ReadStream (ht)
---	image_utils.Save
+	image_utils.SaveByteStream(Stream, State)
+
+	for nbits = 1, 16 do
+		local codes = ht[nbits]
+		local n = #codes
+
+		if n > 0 then
+			local nread = FindCode(nbits, codes, n)
+
+			if nread then
+				return image_utils.GetBits(Stream, nread)
+			else
+				image_utils.LoadByteStream(Stream, State)
+			end
+		end
+	end
 end
 
 --
@@ -138,42 +164,43 @@ local function AuxLoad (jpeg, yfunc)
 	while true do
 		assert(byte(jpeg, pos) == 0xFF, "Not a segment")
 
-		local code, from = byte(jpeg, pos + 1), pos + 4
+		local code, from, len = byte(jpeg, pos + 1), pos + 4, ReadU16(jpeg, pos + 2)
+		local next_pos = pos + len + 2
 
 		-- Start Of Frame --
 		if code == 0xC0 or code == 0xC1 then
 			w, h, state = GetStartOfFrame(jpeg, from, true)
 
-		-- Huffman Table --
+		-- Define Huffman Table --
 		elseif code == 0xC4 then
 			ahtables, dhtables = ahtables or {}, dhtables or {}
 
 			--
-			local hbyte, ht = byte(jpeg, from), {}
+			repeat
+				--
+				local ht, spos = {}, from + 17
 
-			for i = 1, 16 do
-				local count = byte(jpeg, from)
+				for i = 1, 16 do
+					local symbols = {}
 
-				ht[i], from = count, from + 1
-			end
+					for j = 1, byte(jpeg, from + i) do
+						symbols[j], spos = byte(jpeg, spos), spos + 1
+					end
 
-			--
-			for i = 1, 16 do
-				local symbols = {}
-
-				for j = 1, ht[i] do
-					symbols[j], from = byte(jpeg, from), from + 1
+					ht[i] = symbols
 				end
 
-				ht[i] = symbols
-			end
+				--
+				local hbyte = byte(jpeg, from)
 
-			--
-			if hbyte >= 16 then
-				ahtables[hbyte - 15] = ht
-			else
-				dhtables[hbyte + 1] = ht
-			end
+				if hbyte >= 16 then
+					ahtables[hbyte - 15] = ht
+				else
+					dhtables[hbyte + 1] = ht
+				end
+
+				from = spos
+			until from == next_pos
 
 		-- Start Of Scan --
 		elseif code == 0xDA then
@@ -181,7 +208,7 @@ local function AuxLoad (jpeg, yfunc)
 			local n = byte(jpeg, from)
 
 			Stream.m_bytes = jpeg
-			Stream.m_bytes_pos = from + 2 * n + 5
+			Stream.m_bytes_pos = from + 2 * n + 4
 			Stream.m_code_buf = 0
 			Stream.m_code_size = 0
 
@@ -190,14 +217,24 @@ local function AuxLoad (jpeg, yfunc)
 				local ac = ti % 16
 
 				--
-				ReadStream(dhtables[(ti - ac) * 2^-4 + 1])
+				local dc = ReadStream(dhtables[(ti - ac) * 2^-4 + 1])
+
 				-- number of bits, value
 
 				--
 				local aht = ahtables[ac + 1]
 
-				for _ = 1, 64 do
-					ReadStream(aht)
+				for _ = 2, 64 do
+					local aval = ReadStream(aht)
+
+					if aval ~= 0 then
+						local nzeroes = aval % 16
+
+						local nbytes = (aval - nzeroes) * 2^-4
+						print("NBYTES", nbytes)
+					else
+						--
+					end
 
 					-- number of bits, code = number of zeros, number of bytes (bits?)
 				end
@@ -222,34 +259,36 @@ Ai                                 4                      0                     
 repeats for each component.
 ]]
 
-		-- Quantization table --
+		-- Define Quantization table --
 		elseif code == 0xDB then
 			qtables = qtables or {}
 
-			local qbyte = byte(jpeg, from)
-			local is_16bit = qbyte > 16
-			local qt = { is_16bit = is_16bit }
+			repeat
+				local qbyte = byte(jpeg, from)
+				local is_16bit = qbyte > 16
+				local qt = { is_16bit = is_16bit }
 
-			if is_16bit then
-				for pos = from + 1, from + 128, 2 do
-					local a, b = byte(jpeg, pos, pos + 1)
+				if is_16bit then
+					for pos = from + 1, from + 128, 2 do
+						local a, b = byte(jpeg, pos, pos + 1)
 
-					qt[#qt + 1] = a * 2^8 + b
+						qt[#qt + 1] = a * 2^8 + b
+					end
+				else
+					for i = 1, 64 do
+						qt[i] = byte(jpeg, from + i)
+					end
 				end
-			else
-				for i = 1, 64 do
-					qt[i] = byte(jpeg, from + i)
-				end
-			end
 
-			qtables[qbyte % 16 + 1] = qt
+				qtables[qbyte % 16 + 1], from = qt, from + (is_16bit and 128 or 64) + 1
+			until from == next_pos
 
 		-- End Of Image --
 		elseif code == 0xD9 then
 			break
 		end
 
-		pos = pos + ReadU16(jpeg, pos + 2) + 2
+		pos = next_pos
 
 		assert(pos <= total, "Incomplete or corrupt JPEG file")
 	end
