@@ -31,8 +31,10 @@ local sub = string.sub
 
 -- Modules --
 local image_utils = require("image_ops.utils")
+local operators = require("bitwise_ops.operators")
 
 -- Imports --
+local bnot = operators.bnot
 local ReadU16 = image_utils.ReadU16
 
 -- Exports --
@@ -121,70 +123,79 @@ local function DefYieldFunc () end
 local CurByte, BitsRead
 local no = require("number_ops.to_string")
 --
-local function GetBits (jpeg, pos, acc, n)
---	for _ = 1, n do
-		if BitsRead == 0 then
-			CurByte = byte(jpeg, pos)
---print("BYTE", no.Binary(CurByte, 8, true))
-			if CurByte == 0xFF then
-				local next_byte = byte(jpeg, pos + 1)
+local function GetBit (jpeg, pos, acc)
+	if BitsRead == 0 then
+		CurByte = byte(jpeg, pos)
+print("BYTE", no.Binary(CurByte, 8, true))
+		if CurByte == 0xFF then
+			local next_byte = byte(jpeg, pos + 1)
 
-				if next_byte == 0x00 then
-					pos = pos + 1
-				elseif next_byte == 0xFF then
-					-- Fills, skip...
-				else
-					-- Segment :(
-				end
+			if next_byte == 0x00 then
+				pos = pos + 1
+			elseif next_byte == 0xFF then
+				-- Fills, skip...
+			else
+				-- Segment :(
 			end
 		end
+	end
 
-		acc = 2 * acc
+	acc = 2 * acc
 
-		local one = CurByte >= 128
-
-		if one then
-			CurByte, acc = CurByte - 128, acc + 1
-		end
+	if CurByte >= 0x80 then
+		CurByte, acc = CurByte - 0x80, acc + 1
+	end
 --print("ACC", no.Binary(acc, 8, true))
-		CurByte = 2 * CurByte
+	CurByte = 2 * CurByte
+print("BITS READ!", BitsRead)
+	if BitsRead < 7 then
+		BitsRead = BitsRead + 1
+	else
+		BitsRead, pos = 0, pos + 1
+	end
 
-		if BitsRead < 7 then
-			BitsRead = BitsRead + 1
-		else
-			BitsRead, pos = 0, pos + 1
-		end
---	end
-
-	return acc, pos, one
+	return acc, pos
 end
 
--- --
-local function ReadStream (jpeg, pos, ht)
-	local code = 0
+--
+local function GetMatch (jpeg, pos, ht)
+	local match = 0
 
 	for nbits = 1, 16 do
 		local codes = ht[nbits]
 
-		code, pos = GetBits(jpeg, pos, code, 1)
-
-		if codes and codes[code] then
-		
-		print("!!!", nbits)
-			local v, n, one = 0, 0
-			local nn=0
-			repeat
-		--	return
-		nn=nn+1
-			v, pos, one = GetBits(jpeg, pos, v, code)
-			if one then
-				code = code - 1
-			end
-			until code == 0
-			print("TOOK", nn, no.Binary(v, 8, true))
-			return v, pos
+		match, pos = GetBit(jpeg, pos, match)
+if codes and codes[match] then
+	print("M", match)
+	vdump(codes)
+end
+		if codes and codes[match] then
+			return match, pos
 		end
 	end
+end
+
+--
+local function GetNumBits (jpeg, pos, n)
+	local bits = 0
+	local nn=0
+	for _ = 1, n do
+	--	return
+	nn=nn+1
+		bits, pos = GetBit(jpeg, pos, bits)
+	end
+	print("TOOK", nn, no.Binary(bits, 8, true))
+	return bits, pos
+end
+
+--
+local function Extend (v, t)
+print("E!", v, 2^(t - 1))
+	if v < 2^(t - 1) then
+		v = v - bnot(0xFFFFFFFF * 2^t)
+	end
+
+	return v
 end
 
 --
@@ -255,7 +266,37 @@ local function AuxLoad (jpeg, yfunc)
 				local ac, dc = ti % 16
 
 				--
-				dc, pos = ReadStream(jpeg, pos, dhtables[(ti - ac) * 2^-4 + 1])
+				dc, pos = GetMatch(jpeg, pos, dhtables[(ti - ac) * 2^-4 + 1])
+print("DDDD", dc)
+	local extra, r = dc % 16, 0
+	if extra > 0 then
+	print("EXTRA", extra)
+		r, pos = GetNumBits(jpeg, pos, extra)
+print("R!", no.Binary(r, 8, true))
+		print("EXTEND!", Extend(r, dc), no.Binary(Extend(r, dc), 8, true))
+	end
+--[[
+r = 0;
+      numExtraBits = s & 0xF;
+      if (numExtraBits)
+         r = getBits2(numExtraBits);
+      dc = huffExtend(r, s);
+]]
+
+--[[
+Gen Huffman:
+VALPTR(I) = J
+MINCODE(I) = HUFFCODE(J)
+J = J + BITS(I) – 1
+MAXCODE(I) = HUFFCODE(J)
+J = J + 1
+
+Decode:
+if CODE > MAXCODE(I):
+J = VALPTR(I)
+J = J + CODE – MINCODE(I)
+VALUE = HUFFVAL(J)
+]]
 
 				-- number of bits, value
 print("")
@@ -264,15 +305,23 @@ print("DC", ("%x"):format(dc))
 				local aht = ahtables[ac + 1]
 
 				for _ = 2, 64 do
-				print("IT", _)
-					ac, pos = ReadStream(jpeg, pos, aht)
-print("AC", ("%x"):format(ac))
+print("")
+print("IT", _, pos)
+					ac, pos = GetMatch(jpeg, pos, aht)
+print("AC", ("%x"):format(ac), no.Binary(ac, 8, true))
 					if ac ~= 0 then
-						local nbytes = ac % 16
-
-						local nzeroes = (ac - nbytes) * 2^-4
+						local nbits = ac % 16
+						local nzeroes = (ac - nbits) * 2^-4
 						print("NZEROES", nzeroes)
-						print("NBYTES", nbytes)
+						print("NBITS", nbits)
+						if nbits > 0 then
+						local aci
+							aci, pos = GetNumBits(jpeg, pos, nbits)
+							print("AC?", no.Binary(Extend(aci, ac), 8, true))
+						else
+						print("?????")
+						end
+
 					else
 						--
 					end
