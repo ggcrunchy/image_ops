@@ -118,35 +118,71 @@ M.GetInfoString = AuxInfo
 local function DefYieldFunc () end
 
 -- --
-local Stream, State = {}, {}
-
+local CurByte, BitsRead
+local no = require("number_ops.to_string")
 --
-local function FindCode (nbits, codes, n)
-	local bits = image_utils.GetBits(Stream, nbits)
+local function GetBits (jpeg, pos, acc, n)
+--	for _ = 1, n do
+		if BitsRead == 0 then
+			CurByte = byte(jpeg, pos)
+--print("BYTE", no.Binary(CurByte, 8, true))
+			if CurByte == 0xFF then
+				local next_byte = byte(jpeg, pos + 1)
 
-	for i = 1, n do
-		if bits == codes[i] then
-			return bits
+				if next_byte == 0x00 then
+					pos = pos + 1
+				elseif next_byte == 0xFF then
+					-- Fills, skip...
+				else
+					-- Segment :(
+				end
+			end
 		end
-	end
+
+		acc = 2 * acc
+
+		local one = CurByte >= 128
+
+		if one then
+			CurByte, acc = CurByte - 128, acc + 1
+		end
+--print("ACC", no.Binary(acc, 8, true))
+		CurByte = 2 * CurByte
+
+		if BitsRead < 7 then
+			BitsRead = BitsRead + 1
+		else
+			BitsRead, pos = 0, pos + 1
+		end
+--	end
+
+	return acc, pos, one
 end
 
 -- --
-local function ReadStream (ht)
-	image_utils.SaveByteStream(Stream, State)
+local function ReadStream (jpeg, pos, ht)
+	local code = 0
 
 	for nbits = 1, 16 do
 		local codes = ht[nbits]
-		local n = #codes
 
-		if n > 0 then
-			local nread = FindCode(nbits, codes, n)
+		code, pos = GetBits(jpeg, pos, code, 1)
 
-			if nread then
-				return image_utils.GetBits(Stream, nread)
-			else
-				image_utils.LoadByteStream(Stream, State)
+		if codes and codes[code] then
+		
+		print("!!!", nbits)
+			local v, n, one = 0, 0
+			local nn=0
+			repeat
+		--	return
+		nn=nn+1
+			v, pos, one = GetBits(jpeg, pos, v, code)
+			if one then
+				code = code - 1
 			end
+			until code == 0
+			print("TOOK", nn, no.Binary(v, 8, true))
+			return v, pos
 		end
 	end
 end
@@ -181,13 +217,17 @@ local function AuxLoad (jpeg, yfunc)
 				local ht, spos = {}, from + 17
 
 				for i = 1, 16 do
-					local symbols = {}
+					local n = byte(jpeg, from + i)
 
-					for j = 1, byte(jpeg, from + i) do
-						symbols[j], spos = byte(jpeg, spos), spos + 1
+					if n > 0 then
+						local symbols = {}
+
+						for _ = 1, n do
+							symbols[byte(jpeg, spos)], spos = true, spos + 1
+						end
+
+						ht[i] = symbols
 					end
-
-					ht[i] = symbols
 				end
 
 				--
@@ -206,31 +246,32 @@ local function AuxLoad (jpeg, yfunc)
 		elseif code == 0xDA then
 			--
 			local n = byte(jpeg, from)
+			local pos = from + 2 * n + 4
 
-			Stream.m_bytes = jpeg
-			Stream.m_bytes_pos = from + 2 * n + 4
-			Stream.m_code_buf = 0
-			Stream.m_code_size = 0
+			BitsRead = 0
 
 			for _ = 1, n do
 				local comp, ti = Component[byte(jpeg, from + 1)], byte(jpeg, from + 2)
-				local ac = ti % 16
+				local ac, dc = ti % 16
 
 				--
-				local dc = ReadStream(dhtables[(ti - ac) * 2^-4 + 1])
+				dc, pos = ReadStream(jpeg, pos, dhtables[(ti - ac) * 2^-4 + 1])
 
 				-- number of bits, value
-
+print("")
+print("DC", ("%x"):format(dc))
 				--
 				local aht = ahtables[ac + 1]
 
 				for _ = 2, 64 do
-					local aval = ReadStream(aht)
+				print("IT", _)
+					ac, pos = ReadStream(jpeg, pos, aht)
+print("AC", ("%x"):format(ac))
+					if ac ~= 0 then
+						local nbytes = ac % 16
 
-					if aval ~= 0 then
-						local nzeroes = aval % 16
-
-						local nbytes = (aval - nzeroes) * 2^-4
+						local nzeroes = (ac - nbytes) * 2^-4
+						print("NZEROES", nzeroes)
 						print("NBYTES", nbytes)
 					else
 						--
@@ -242,19 +283,6 @@ local function AuxLoad (jpeg, yfunc)
 				from = from + 2
 			end
 --[[
-SOS                             16                    0xffd8              Start Of Scan
-Ls                                16                    2Ns + 6           Scan header length
-Ns                                8                      1-4                   Number of image components
-Csj                               8                      0-255               Scan Component Selector
-Tdj                               4                      0-1                   DC Coding Table Selector
-Taj                               4                      0-1                   AC Coding Table Selector
-Ss                                8                      0                      Start of spectral selection
-Se                                8                      63                    End of spectral selection
-Ah                                4                      0                      Successive Approximation Bit High
-Ai                                 4                      0                      Successive Approximation Bit Low
--------------------------------------------------------
-~~~~~ After the SOS Header Information follows the encoded data which is in the following format.~~~~~~~
- 
 [dc huf][value]  [ac huf][value]  [ac huf] [value]  [ac huf] [value]…..
 repeats for each component.
 ]]
@@ -279,7 +307,7 @@ repeats for each component.
 						qt[i] = byte(jpeg, from + i)
 					end
 				end
-
+-- ^^ TODO: Zagzig?
 				qtables[qbyte % 16 + 1], from = qt, from + (is_16bit and 128 or 64) + 1
 			until from == next_pos
 

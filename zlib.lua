@@ -50,11 +50,60 @@ local image_utils = require("image_ops.utils")
 -- Imports --
 local band = operators.band
 local bnot = operators.bnot
-local GetBits = image_utils.GetBits
-local GetCode = image_utils.GetCode
+local rshift = operators.rshift
 
 -- Exports --
 local M = {}
+
+--
+local function AuxGet (FS, n, buf, size)
+	local bytes, pos, shift = FS.m_bytes, FS.m_bytes_pos, 2^size
+
+	repeat
+		buf = buf + byte(bytes, pos) * shift
+		size, pos, shift = size + 8, pos + 1, shift * 256
+	until shift >= n
+
+	FS.m_bytes_pos = pos
+
+	return buf, size
+end
+
+--- DOCME
+local function GetBits (FS, bits)
+	local buf, size, bsize = FS.m_code_buf, FS.m_code_size, 2^bits
+
+	if size < bits then
+		buf, size = AuxGet(FS, bsize, buf, size)
+	end
+
+	local bval = buf % bsize
+
+	FS.m_code_buf = (buf - bval) / bsize
+	FS.m_code_size = size - bits
+
+	return bval
+end
+
+--
+local function GetCode (FS, codes)
+	local buf, size, csize = FS.m_code_buf, FS.m_code_size, codes.size
+
+	if size < codes.max_len then
+		buf, size = AuxGet(FS, csize, buf, size)
+	end
+
+	local code = codes[buf % csize + 1]
+	local cval = code % 2^16
+	local clen = (code - cval) * 2^-16
+
+	assert(size ~= 0 and size >= clen and clen ~= 0, "Bad encoding in flate stream")
+
+	FS.m_code_buf = rshift(buf, clen)
+	FS.m_code_size = size - clen
+
+	return cval
+end
 
 --
 local function Repeat (FS, array, i, len, offset, what)
