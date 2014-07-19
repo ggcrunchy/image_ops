@@ -107,26 +107,19 @@ end
 --- DOCME
 M.GetInfoString = AuxInfo
 
---[[
-	Decoding:
-
-	http://en.wikipedia.org/wiki/JPEG
-	http://kd5col.info/swag/GRAPHICS/0143.PAS.html
-	http://vip.sugovica.hu/Sardi/kepnezo/JPEG%20File%20Layout%20and%20Format.htm
-	http://www.xbdev.net/image_formats/jpeg/tut_jpg/jpeg_file_layout.php
-]]
-
 -- Default yield function: no-op
 local function DefYieldFunc () end
 
 -- --
 local CurByte, BitsRead
+-- TESTING!
 local no = require("number_ops.to_string")
+-- /TESTING!
 --
 local function GetBit (jpeg, pos, acc)
 	if BitsRead == 0 then
 		CurByte = byte(jpeg, pos)
-print("BYTE", no.Binary(CurByte, 8, true))
+
 		if CurByte == 0xFF then
 			local next_byte = byte(jpeg, pos + 1)
 
@@ -145,9 +138,9 @@ print("BYTE", no.Binary(CurByte, 8, true))
 	if CurByte >= 0x80 then
 		CurByte, acc = CurByte - 0x80, acc + 1
 	end
---print("ACC", no.Binary(acc, 8, true))
+
 	CurByte = 2 * CurByte
-print("BITS READ!", BitsRead)
+
 	if BitsRead < 7 then
 		BitsRead = BitsRead + 1
 	else
@@ -158,44 +151,139 @@ print("BITS READ!", BitsRead)
 end
 
 --
-local function GetMatch (jpeg, pos, ht)
-	local match = 0
+local function Decode (jpeg, pos, ht)
+	local code = 0
 
 	for nbits = 1, 16 do
-		local codes = ht[nbits]
+		local symbols = ht[nbits]
 
-		match, pos = GetBit(jpeg, pos, match)
-if codes and codes[match] then
-	print("M", match)
-	vdump(codes)
-end
-		if codes and codes[match] then
-			return match, pos
+		code, pos = GetBit(jpeg, pos, code)
+
+		if symbols then
+			local min_code = symbols.min_code
+
+			if code < min_code + #symbols then
+				return symbols[code - min_code + 1], pos
+			end
 		end
 	end
 end
 
 --
-local function GetNumBits (jpeg, pos, n)
+local function Receive (jpeg, pos, n)
 	local bits = 0
-	local nn=0
+
 	for _ = 1, n do
-	--	return
-	nn=nn+1
 		bits, pos = GetBit(jpeg, pos, bits)
 	end
-	print("TOOK", nn, no.Binary(bits, 8, true))
+
 	return bits, pos
 end
 
 --
 local function Extend (v, t)
-print("E!", v, 2^(t - 1))
 	if v < 2^(t - 1) then
 		v = v - bnot(0xFFFFFFFF * 2^t)
 	end
 
 	return v
+end
+
+--
+local function DHT (jpeg, from)
+	local ht, spos, code = {}, from + 17, 0
+
+	for i = 1, 16 do
+		local n = byte(jpeg, from + i)
+
+		if n > 0 then
+			local symbols = { min_code = code }
+
+			for i = 1, n do
+				symbols[i], spos = byte(jpeg, spos), spos + 1
+			end
+
+			ht[i], code = symbols, code + n
+		end
+
+		code = 2 * code
+	end
+
+	return ht, spos
+end
+
+--
+local function DQT (jpeg, from, qbyte)
+	local is_16bit = qbyte > 16
+	local qt = { is_16bit = is_16bit }
+
+	if is_16bit then
+		for pos = from + 1, from + 128, 2 do
+			local a, b = byte(jpeg, pos, pos + 1)
+
+			qt[#qt + 1] = a * 2^8 + b
+		end
+	else
+		for i = 1, 64 do
+			qt[i] = byte(jpeg, from + i)
+		end
+	end
+-- ^^ TODO: Zagzig?
+	return qt, from + (is_16bit and 128 or 64) + 1
+end
+
+--
+local function ReadMCU (jpeg, pos, dht, aht, yfunc)
+	local ac, dc
+
+	--
+	dc, pos = Decode(jpeg, pos, dht)
+print("DDDD", dc)
+local extra, r = dc % 16, 0
+if extra > 0 then
+print("EXTRA", extra)
+r, pos = Receive(jpeg, pos, extra)
+print("R!", no.Binary(r, 8, true))
+print("EXTEND!", Extend(r, dc), no.Binary(Extend(r, dc), 8, true))
+end
+--[[
+r = 0;
+numExtraBits = s & 0xF;
+if (numExtraBits)
+r = getBits2(numExtraBits);
+dc = huffExtend(r, s);
+]]
+
+	-- number of bits, value
+print("")
+print("DC", ("%x"):format(dc))
+	--
+	for _ = 2, 5 do--64 do
+print("")
+print("IT", _, pos)
+		ac, pos = Decode(jpeg, pos, aht)
+print("AC", ("%x"):format(ac), no.Binary(ac, 8, true))
+		if ac ~= 0 then
+			local nbits = ac % 16
+			local nzeroes = (ac - nbits) * 2^-4
+			print("NZEROES", nzeroes)
+			print("NBITS", nbits)
+			if nbits > 0 then
+			local aci
+				aci, pos = Receive(jpeg, pos, nbits)
+				print("AC?", no.Binary(Extend(aci, ac), 8, true))
+			else
+			print("?????")
+			end
+
+		else
+			--
+		end
+
+		-- number of bits, code = number of zeros, number of bytes (bits?)
+	end
+
+	return pos
 end
 
 --
@@ -222,27 +310,8 @@ local function AuxLoad (jpeg, yfunc)
 		elseif code == 0xC4 then
 			ahtables, dhtables = ahtables or {}, dhtables or {}
 
-			--
 			repeat
-				--
-				local ht, spos = {}, from + 17
-
-				for i = 1, 16 do
-					local n = byte(jpeg, from + i)
-
-					if n > 0 then
-						local symbols = {}
-
-						for _ = 1, n do
-							symbols[byte(jpeg, spos)], spos = true, spos + 1
-						end
-
-						ht[i] = symbols
-					end
-				end
-
-				--
-				local hbyte = byte(jpeg, from)
+				local hbyte, ht, spos = byte(jpeg, from), DHT(jpeg, from)
 
 				if hbyte >= 16 then
 					ahtables[hbyte - 15] = ht
@@ -263,78 +332,11 @@ local function AuxLoad (jpeg, yfunc)
 
 			for _ = 1, n do
 				local comp, ti = Component[byte(jpeg, from + 1)], byte(jpeg, from + 2)
-				local ac, dc = ti % 16
+				local ac = ti % 16
 
-				--
-				dc, pos = GetMatch(jpeg, pos, dhtables[(ti - ac) * 2^-4 + 1])
-print("DDDD", dc)
-	local extra, r = dc % 16, 0
-	if extra > 0 then
-	print("EXTRA", extra)
-		r, pos = GetNumBits(jpeg, pos, extra)
-print("R!", no.Binary(r, 8, true))
-		print("EXTEND!", Extend(r, dc), no.Binary(Extend(r, dc), 8, true))
-	end
---[[
-r = 0;
-      numExtraBits = s & 0xF;
-      if (numExtraBits)
-         r = getBits2(numExtraBits);
-      dc = huffExtend(r, s);
-]]
-
---[[
-Gen Huffman:
-VALPTR(I) = J
-MINCODE(I) = HUFFCODE(J)
-J = J + BITS(I) – 1
-MAXCODE(I) = HUFFCODE(J)
-J = J + 1
-
-Decode:
-if CODE > MAXCODE(I):
-J = VALPTR(I)
-J = J + CODE – MINCODE(I)
-VALUE = HUFFVAL(J)
-]]
-
-				-- number of bits, value
-print("")
-print("DC", ("%x"):format(dc))
-				--
-				local aht = ahtables[ac + 1]
-
-				for _ = 2, 64 do
-print("")
-print("IT", _, pos)
-					ac, pos = GetMatch(jpeg, pos, aht)
-print("AC", ("%x"):format(ac), no.Binary(ac, 8, true))
-					if ac ~= 0 then
-						local nbits = ac % 16
-						local nzeroes = (ac - nbits) * 2^-4
-						print("NZEROES", nzeroes)
-						print("NBITS", nbits)
-						if nbits > 0 then
-						local aci
-							aci, pos = GetNumBits(jpeg, pos, nbits)
-							print("AC?", no.Binary(Extend(aci, ac), 8, true))
-						else
-						print("?????")
-						end
-
-					else
-						--
-					end
-
-					-- number of bits, code = number of zeros, number of bytes (bits?)
-				end
-
+				pos = ReadMCU(jpeg, pos, dhtables[(ti - ac) * 2^-4 + 1], ahtables[ac + 1], yfunc)
 				from = from + 2
 			end
---[[
-[dc huf][value]  [ac huf][value]  [ac huf] [value]  [ac huf] [value]…..
-repeats for each component.
-]]
 
 		-- Define Quantization table --
 		elseif code == 0xDB then
@@ -342,22 +344,8 @@ repeats for each component.
 
 			repeat
 				local qbyte = byte(jpeg, from)
-				local is_16bit = qbyte > 16
-				local qt = { is_16bit = is_16bit }
 
-				if is_16bit then
-					for pos = from + 1, from + 128, 2 do
-						local a, b = byte(jpeg, pos, pos + 1)
-
-						qt[#qt + 1] = a * 2^8 + b
-					end
-				else
-					for i = 1, 64 do
-						qt[i] = byte(jpeg, from + i)
-					end
-				end
--- ^^ TODO: Zagzig?
-				qtables[qbyte % 16 + 1], from = qt, from + (is_16bit and 128 or 64) + 1
+				qtables[qbyte % 16 + 1], from = DQT(jpeg, from, qbyte)
 			until from == next_pos
 
 		-- End Of Image --
@@ -371,43 +359,32 @@ repeats for each component.
 	end
 
 	--
-	local function Decode ()
---[[
-		local decoded = DecodePixels(data, state, w, yfunc)
-
-		decoded, data = CopyToImageData(decoded, state, w * h * 4, yfunc)
-
-		return decoded
-]]
-	end
-
-	--
 	local JPEG = {}
 
 	--- DOCME
 	function JPEG:ForEach (func, arg)
-		pixels = pixels or Decode()
+	--	pixels = pixels or Decode()
 
 		image_utils.ForEach(pixels, w, h, func, nil, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEach_OnRow (func, on_row, arg)
-		pixels = pixels or Decode()
+	--	pixels = pixels or Decode()
 
 		image_utils.ForEach(pixels, w, h, func, on_row, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEachInColumn (func, col, arg)
-		pixels = pixels or Decode()
+	--	pixels = pixels or Decode()
 
 		image_utils.ForEachInColumn(pixels, w, h, func, col, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEachInRow (func, row, arg)
-		pixels = pixels or Decode()
+	--	pixels = pixels or Decode()
 
 		image_utils.ForEachInRow(pixels, w, func, row, arg)
 	end
@@ -419,7 +396,7 @@ repeats for each component.
 
 	--- DOCME
 	function JPEG:GetPixels ()
-		pixels = pixels or Decode()
+	--	pixels = pixels or Decode()
 
 		return pixels
 	end
