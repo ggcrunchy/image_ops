@@ -47,6 +47,13 @@ local M = {}
 local Component = { "Y", "Cb", "Cr", "I", "Q" }
 
 --
+local function Nybbles (n)
+	local low = n % 16
+
+	return (n - low) * 2^-4, low
+end
+
+--
 local function GetStartOfFrame (str, pos, get_data)
 	local nbits, data = byte(str, pos)
 	local h = ReadU16(str, pos + 1)
@@ -56,13 +63,11 @@ local function GetStartOfFrame (str, pos, get_data)
 		data, pos = { nbits = nbits }, pos + 5
 
 		for i = 1, byte(str, pos) * 3, 3 do
-			local factors = byte(str, pos + i + 1)
-			local vert = factors % 16
+			local horz, vert = Nybbles(byte(str, pos + i + 1))
 
 			data[#data + 1] = {
 				id = Component[byte(str, pos + i)],
-				horz_samp_factor = (factors - vert) * 2^-4,
-				vert_samp_factor = vert,
+				horz_samp_factor = horz, vert_samp_factor = vert,
 				quantization_table = byte(str, pos + i + 2)
 			}
 		end
@@ -110,75 +115,49 @@ end
 --- DOCME
 M.GetInfoString = AuxInfo
 
--- Default yield function: no-op
-local function DefYieldFunc () end
-
--- --
-local CurByte, BitsRead
-
 --
-local function GetBit (jpeg, pos, acc)
-	if BitsRead == 0 then
-		CurByte = byte(jpeg, pos)
+local function OnByte (cur_byte, jpeg, pos)
+	if cur_byte == 0xFF then
+		local next_byte = byte(jpeg, pos + 1)
 
-		if CurByte == 0xFF then
-			local next_byte = byte(jpeg, pos + 1)
-
-			if next_byte == 0x00 then
-				pos = pos + 1
-			elseif next_byte == 0xFF then
-				-- Fills, skip...
-			else
-				-- Segment :(
-			end
+		if next_byte == 0x00 then
+			return pos + 1
+		elseif next_byte == 0xFF then
+			-- Fills, skip...
+		else
+			-- Segment :(
 		end
 	end
-
-	acc = 2 * acc
-
-	if CurByte >= 0x80 then
-		CurByte, acc = CurByte - 0x80, acc + 1
-	end
-
-	CurByte = 2 * CurByte
-
-	if BitsRead < 7 then
-		BitsRead = BitsRead + 1
-	else
-		BitsRead, pos = 0, pos + 1
-	end
-
-	return acc, pos
 end
 
 --
-local function Decode (jpeg, pos, ht)
+local function Decode (get_bit, ht)
 	local code = 0
 
 	for nbits = 1, 16 do
 		local symbols = ht[nbits]
 
-		code, pos = GetBit(jpeg, pos, code)
+		code = get_bit(code)
 
 		if symbols then
 			local min_code = symbols.min_code
 
 			if code < min_code + #symbols then
-				return symbols[code - min_code + 1], pos
+				return symbols[code - min_code + 1]
 			end
 		end
 	end
 end
 
 --
-local function Receive (jpeg, pos, n)
+local function Receive (get_bit, n)
 	local bits = 0
 
 	for _ = 1, n do
-		bits, pos = GetBit(jpeg, pos, bits)
+		bits = get_bit(bits)
 	end
 
-	return bits, pos
+	return bits
 end
 
 --
@@ -200,8 +179,8 @@ local function DHT (jpeg, from)
 		if n > 0 then
 			local symbols = { min_code = code }
 
-			for i = 1, n do
-				symbols[i], spos = byte(jpeg, spos), spos + 1
+			for j = 1, n do
+				symbols[j], spos = byte(jpeg, spos), spos + 1
 			end
 
 			ht[i], code = symbols, code + n
@@ -234,7 +213,7 @@ local function DQT (jpeg, from, qbyte)
 end
 
 --
-local function ReadMCU (jpeg, pos, scans, preds, n, yfunc)
+local function ReadMCU (get_bit, scans, preds, n, yfunc)
 	for i = 1, n do
 		local scan, ac, dc = scans[i]
 		local dht, aht, qt, hsf = scan.dht, scan.aht, scan.qt, scan.hsf
@@ -242,12 +221,12 @@ local function ReadMCU (jpeg, pos, scans, preds, n, yfunc)
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
 				--
-				dc, pos = Decode(jpeg, pos, dht)
+				dc = Decode(get_bit, dht)
 
 				local extra, r = dc % 16, 0
 
 				if extra > 0 then
-					r, pos = Receive(jpeg, pos, extra)
+					r = Receive(get_bit, extra)
 				end
 
 				preds[i] = preds[i] + Extend(r, dc)
@@ -256,14 +235,10 @@ local function ReadMCU (jpeg, pos, scans, preds, n, yfunc)
 				local k = 2
 
 				while k <= 64 do
-					ac, pos = Decode(jpeg, pos, aht)
-
-					local nbits = ac % 16
-					local nzeroes = (ac - nbits) * 2^-4
+					local nzeroes, nbits = Nybbles(Decode(get_bit, aht))
 
 					if nbits > 0 then
-						ac, pos = Receive(jpeg, pos, nbits)
-						ac, k = Extend(ac, nbits), k + nzeroes + 1
+						ac, k = Extend(Receive(get_bit, nbits), nbits), k + nzeroes + 1
 					elseif nzeroes == 0xF then
 						k = k + 16
 					else
@@ -276,8 +251,6 @@ local function ReadMCU (jpeg, pos, scans, preds, n, yfunc)
 			end
 		end
 	end
-
-	return pos
 end
 
 --
@@ -289,15 +262,12 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
 
 		for _, scomp in ipairs(state) do
 			if comp == scomp.id then
-				local ti = byte(jpeg, from + 2)
-				local ac = ti % 16
+				local di, ai = Nybbles(byte(jpeg, from + 2))
 
 				scans[i], preds[i] = {
-					dht = dhtables[(ti - ac) * 2^-4 + 1],
-					aht = ahtables[ac + 1],
-					qt =  qtables[scomp.quantization_table + 1],
-					hsf = scomp.horz_samp_factor,
-					vsf = scomp.vert_samp_factor
+					hsf = scomp.horz_samp_factor, vsf = scomp.vert_samp_factor,
+					dht = dhtables[di + 1], aht = ahtables[ai + 1],
+					qt = qtables[scomp.quantization_table + 1]
 				}, 0
 
 				break
@@ -310,6 +280,9 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
 	return scans, preds
 end
 
+-- Default yield function: no-op
+local function DefYieldFunc () end
+
 --
 local function AuxLoad (jpeg, yfunc)
 	local state, w, h
@@ -318,7 +291,7 @@ local function AuxLoad (jpeg, yfunc)
 
 	yfunc = yfunc or DefYieldFunc
 
-	local pos, total, pixels, ahtables, dhtables, qtables = 3, #jpeg
+	local pos, total, ahtables, dhtables, qtables, pixels, restart = 3, #jpeg, {}, {}, {}
 
 	while true do
 		assert(byte(jpeg, pos) == 0xFF, "Not a segment")
@@ -336,7 +309,6 @@ local function AuxLoad (jpeg, yfunc)
 		if code == 0xC0 or code == 0xC1 then
 			w, h, state = GetStartOfFrame(jpeg, from, true)
 
-			--
 			for _, comp in ipairs(state) do
 				state.hmax = max(state.hmax or 0, comp.horz_samp_factor)
 				state.vmax = max(state.vmax or 0, comp.vert_samp_factor)
@@ -344,8 +316,6 @@ local function AuxLoad (jpeg, yfunc)
 
 		-- Define Huffman Table --
 		elseif code == 0xC4 then
-			ahtables, dhtables = ahtables or {}, dhtables or {}
-
 			repeat
 				local hbyte, ht, spos = byte(jpeg, from), DHT(jpeg, from)
 
@@ -365,24 +335,18 @@ local function AuxLoad (jpeg, yfunc)
 			local scans, preds = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n)
 
 			--
-			local pos, hsize, vsize = from + 2 * n + 4, state.hmax * 8, state.vmax * 8
+			local get_bit, get_pos = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte)
+			local hsize, vsize = state.hmax * 8, state.vmax * 8
 			local nx, ny = floor((w + hsize - 1) / hsize), floor((h + vsize - 1) / vsize)
-			local hn, vn = hsize * nx, vsize * ny
 
-			BitsRead = 0	
-
-			for _y = 1, vn, vsize do
-				for _x = 1, hn, hsize do
-					pos = ReadMCU(jpeg, pos, scans, preds, n, yfunc)
-				end
+			for _ = 1, nx * ny do
+				ReadMCU(get_bit, scans, preds, n, yfunc)
 			end
 
-			next_pos = pos + 1
+			next_pos = get_pos() + 1
 
 		-- Define Quantization table --
 		elseif code == 0xDB then
-			qtables = qtables or {}
-
 			repeat
 				local qbyte = byte(jpeg, from)
 
@@ -391,7 +355,7 @@ local function AuxLoad (jpeg, yfunc)
 
 		-- Define Restart Interval --
 		elseif code == 0xDD then
-			-- TODO!
+			restart = ReadU16(jpeg, from)
 		end
 
 		pos = next_pos

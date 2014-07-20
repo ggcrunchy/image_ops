@@ -32,7 +32,53 @@ local sub = string.sub
 local M = {}
 
 --
-local function DefRowFunc () end
+local function DefByteFunc () end
+
+--- DOCME
+function M.BitReader (stream, pos, on_byte)
+	on_byte = on_byte or DefByteFunc
+
+	local bits_read, cur_byte = 0
+
+	return function(acc)
+		if bits_read == 0 then
+			cur_byte = byte(stream, pos)
+
+			local new_pos = on_byte(cur_byte, stream, pos)
+
+			if new_pos then
+				pos = new_pos
+			end
+
+			-- ^^^ TODO: Should be able to handle e.g. stuff bytes in JPEG
+		end
+
+		acc = 2 * acc
+
+		if cur_byte >= 0x80 then
+			cur_byte, acc = cur_byte - 0x80, acc + 1
+		end
+
+		cur_byte = 2 * cur_byte
+
+		if bits_read < 7 then
+			bits_read = bits_read + 1
+		else
+			bits_read, pos = 0, pos + 1
+		end
+
+		return acc
+	end,
+	function()
+		return pos
+	end
+end
+
+-- --
+local CurByte, BitsRead
+
+--
+local DefRowFunc = DefByteFunc
 
 --- DOCME
 function M.ForEach (pixels, w, h, func, on_row, arg)
