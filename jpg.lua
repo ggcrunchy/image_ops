@@ -27,6 +27,9 @@
 local assert = assert
 local byte = string.byte
 local char = string.char
+local floor = math.floor
+local ipairs = ipairs
+local max = math.max
 local sub = string.sub
 
 -- Modules --
@@ -58,7 +61,7 @@ local function GetStartOfFrame (str, pos, get_data)
 
 			data[#data + 1] = {
 				id = Component[byte(str, pos + i)],
-				horz_samp_factor = .125 * (factors - vert),
+				horz_samp_factor = (factors - vert) * 2^-4,
 				vert_samp_factor = vert,
 				quantization_table = byte(str, pos + i + 2)
 			}
@@ -112,9 +115,7 @@ local function DefYieldFunc () end
 
 -- --
 local CurByte, BitsRead
--- TESTING!
-local no = require("number_ops.to_string")
--- /TESTING!
+
 --
 local function GetBit (jpeg, pos, acc)
 	if BitsRead == 0 then
@@ -233,57 +234,80 @@ local function DQT (jpeg, from, qbyte)
 end
 
 --
-local function ReadMCU (jpeg, pos, dht, aht, yfunc)
-	local ac, dc
+local function ReadMCU (jpeg, pos, scans, preds, n, yfunc)
+	for i = 1, n do
+		local scan, ac, dc = scans[i]
+		local dht, aht, qt, hsf = scan.dht, scan.aht, scan.qt, scan.hsf
 
-	--
-	dc, pos = Decode(jpeg, pos, dht)
-print("DDDD", dc)
-local extra, r = dc % 16, 0
-if extra > 0 then
-print("EXTRA", extra)
-r, pos = Receive(jpeg, pos, extra)
-print("R!", no.Binary(r, 8, true))
-print("EXTEND!", Extend(r, dc), no.Binary(Extend(r, dc), 8, true))
-end
---[[
-r = 0;
-numExtraBits = s & 0xF;
-if (numExtraBits)
-r = getBits2(numExtraBits);
-dc = huffExtend(r, s);
-]]
+		for y = 1, scan.vsf do
+			for x = 1, hsf do
+				--
+				dc, pos = Decode(jpeg, pos, dht)
 
-	-- number of bits, value
-print("")
-print("DC", ("%x"):format(dc))
-	--
-	for _ = 2, 5 do--64 do
-print("")
-print("IT", _, pos)
-		ac, pos = Decode(jpeg, pos, aht)
-print("AC", ("%x"):format(ac), no.Binary(ac, 8, true))
-		if ac ~= 0 then
-			local nbits = ac % 16
-			local nzeroes = (ac - nbits) * 2^-4
-			print("NZEROES", nzeroes)
-			print("NBITS", nbits)
-			if nbits > 0 then
-			local aci
-				aci, pos = Receive(jpeg, pos, nbits)
-				print("AC?", no.Binary(Extend(aci, ac), 8, true))
-			else
-			print("?????")
+				local extra, r = dc % 16, 0
+
+				if extra > 0 then
+					r, pos = Receive(jpeg, pos, extra)
+				end
+
+				preds[i] = preds[i] + Extend(r, dc)
+
+				--
+				local k = 2
+
+				while k <= 64 do
+					ac, pos = Decode(jpeg, pos, aht)
+
+					local nbits = ac % 16
+					local nzeroes = (ac - nbits) * 2^-4
+
+					if nbits > 0 then
+						ac, pos = Receive(jpeg, pos, nbits)
+						ac, k = Extend(ac, nbits), k + nzeroes + 1
+					elseif nzeroes == 0xF then
+						k = k + 16
+					else
+						break
+					end
+
+				end
+
+				yfunc()
 			end
-
-		else
-			--
 		end
-
-		-- number of bits, code = number of zeros, number of bytes (bits?)
 	end
 
 	return pos
+end
+
+--
+local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
+	local scans, preds = {}, {}
+
+	for i = 1, n do
+		local comp = Component[byte(jpeg, from + 1)]
+
+		for _, scomp in ipairs(state) do
+			if comp == scomp.id then
+				local ti = byte(jpeg, from + 2)
+				local ac = ti % 16
+
+				scans[i], preds[i] = {
+					dht = dhtables[(ti - ac) * 2^-4 + 1],
+					aht = ahtables[ac + 1],
+					qt =  qtables[scomp.quantization_table + 1],
+					hsf = scomp.horz_samp_factor,
+					vsf = scomp.vert_samp_factor
+				}, 0
+
+				break
+			end
+		end
+
+		from = from + 2
+	end
+
+	return scans, preds
 end
 
 --
@@ -299,12 +323,24 @@ local function AuxLoad (jpeg, yfunc)
 	while true do
 		assert(byte(jpeg, pos) == 0xFF, "Not a segment")
 
-		local code, from, len = byte(jpeg, pos + 1), pos + 4, ReadU16(jpeg, pos + 2)
+		local code = byte(jpeg, pos + 1)
+
+		if code == 0xD9 then
+			break
+		end
+
+		local from, len = pos + 4, ReadU16(jpeg, pos + 2)
 		local next_pos = pos + len + 2
 
 		-- Start Of Frame --
 		if code == 0xC0 or code == 0xC1 then
 			w, h, state = GetStartOfFrame(jpeg, from, true)
+
+			--
+			for _, comp in ipairs(state) do
+				state.hmax = max(state.hmax or 0, comp.horz_samp_factor)
+				state.vmax = max(state.vmax or 0, comp.vert_samp_factor)
+			end
 
 		-- Define Huffman Table --
 		elseif code == 0xC4 then
@@ -326,17 +362,22 @@ local function AuxLoad (jpeg, yfunc)
 		elseif code == 0xDA then
 			--
 			local n = byte(jpeg, from)
-			local pos = from + 2 * n + 4
+			local scans, preds = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n)
 
-			BitsRead = 0
+			--
+			local pos, hsize, vsize = from + 2 * n + 4, state.hmax * 8, state.vmax * 8
+			local nx, ny = floor((w + hsize - 1) / hsize), floor((h + vsize - 1) / vsize)
+			local hn, vn = hsize * nx, vsize * ny
 
-			for _ = 1, n do
-				local comp, ti = Component[byte(jpeg, from + 1)], byte(jpeg, from + 2)
-				local ac = ti % 16
+			BitsRead = 0	
 
-				pos = ReadMCU(jpeg, pos, dhtables[(ti - ac) * 2^-4 + 1], ahtables[ac + 1], yfunc)
-				from = from + 2
+			for _y = 1, vn, vsize do
+				for _x = 1, hn, hsize do
+					pos = ReadMCU(jpeg, pos, scans, preds, n, yfunc)
+				end
 			end
+
+			next_pos = pos + 1
 
 		-- Define Quantization table --
 		elseif code == 0xDB then
@@ -348,9 +389,9 @@ local function AuxLoad (jpeg, yfunc)
 				qtables[qbyte % 16 + 1], from = DQT(jpeg, from, qbyte)
 			until from == next_pos
 
-		-- End Of Image --
-		elseif code == 0xD9 then
-			break
+		-- Define Restart Interval --
+		elseif code == 0xDD then
+			-- TODO!
 		end
 
 		pos = next_pos
