@@ -30,6 +30,7 @@ local char = string.char
 local floor = math.floor
 local ipairs = ipairs
 local max = math.max
+local min = math.min
 local sub = string.sub
 
 -- Modules --
@@ -212,41 +213,128 @@ local function DQT (jpeg, from, qbyte)
 	return qt, from + (is_16bit and 128 or 64) + 1
 end
 
+-- --
+local Cos = {}
+
+do
+	local Sqrt2_2 = .25 * math.sqrt(2)
+
+	for x = 0, 7 do
+		local k = 2 * x + 1
+
+		Cos[#Cos + 1] = Sqrt2_2
+
+		for u = 1, 7 do
+			Cos[#Cos + 1] = .5 * math.cos(k * u * math.pi / 16)
+		end
+	end
+end
+
+-- --
+local Zagzig = {
+    0,  1,  8, 16,  9,  2,  3, 10,
+   17, 24, 32, 25, 18, 11,  4,  5,
+   12, 19, 26, 33, 40, 48, 41, 34,
+   27, 20, 13,  6,  7, 14, 21, 28,
+   35, 42, 49, 56, 57, 50, 43, 36,
+   29, 22, 15, 23, 30, 37, 44, 51,
+   58, 59, 52, 45, 38, 31, 39, 46,
+   53, 60, 61, 54, 47, 55, 62, 63
+}
+
+-- --
+local ZZ, Q = {}, {}
+
+--
+local function FillZeroes (k, n)
+	for i = k, k + n - 1 do
+		ZZ[i] = 0
+	end
+
+	return k + n
+end
+
 --
 local function ReadMCU (get_bit, scans, preds, n, yfunc)
+	local up_to = 64
+
 	for i = 1, n do
-		local scan, ac, dc = scans[i]
+		local scan = scans[i]
 		local dht, aht, qt, hsf = scan.dht, scan.aht, scan.qt, scan.hsf
 
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
 				--
-				dc = Decode(get_bit, dht)
+				local s = Decode(get_bit, dht)
 
-				local extra, r = dc % 16, 0
+				local extra, r = s % 16, 0
 
 				if extra > 0 then
 					r = Receive(get_bit, extra)
 				end
 
-				preds[i] = preds[i] + Extend(r, dc)
+				preds[i] = preds[i] + Extend(r, s)
 
 				--
-				local k = 2
+				local k, maxk, size = 1, 0, 64
 
-				while k <= 64 do
+				while k < 64 do
 					local nzeroes, nbits = Nybbles(Decode(get_bit, aht))
 
 					if nbits > 0 then
-						ac, k = Extend(Receive(get_bit, nbits), nbits), k + nzeroes + 1
+						k = FillZeroes(k, nzeroes)
+						ZZ[k], k, maxk = Extend(Receive(get_bit, nbits), nbits), k + 1, k
 					elseif nzeroes == 0xF then
-						k = k + 16
+						k = FillZeroes(k, 16)
 					else
+						local kp7 = k + 7
+
+						size = kp7 - kp7 % 8
+
+						FillZeroes(k, size - k)
+
 						break
 					end
-
 				end
 
+				--
+				Q[1] = preds[i] * qt[1]
+
+				for j = 1, size - 1 do
+					Q[Zagzig[j + 1] + 1] = qt[j + 1] * ZZ[j]
+				end
+
+				for j = size, 63 do
+					Q[Zagzig[j + 1] + 1] = 0
+				end
+
+				--
+				local index = 1
+
+				for y = 1, size, 8 do
+					for x = 1, 64, 8 do
+						local sum, j = 0, 1
+
+						for v = y, y + 7 do
+							local cosvy = Cos[v]
+
+							for u = x, x + 7 do
+								sum, j = sum + Cos[u] * cosvy * Q[j], j + 1
+							end
+						end
+
+						ZZ[index], index = min(max(sum + 128, 0), 255), index + 1
+					end
+				end
+
+				--
+				for i = index, up_to do
+					ZZ[i] = 0
+				end
+
+				up_to = index - 1
+
+				--
 				yfunc()
 			end
 		end
