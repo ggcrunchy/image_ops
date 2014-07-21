@@ -209,7 +209,7 @@ local function DQT (jpeg, from, qbyte)
 			qt[i] = byte(jpeg, from + i)
 		end
 	end
--- ^^ TODO: Zagzig?
+
 	return qt, from + (is_16bit and 128 or 64) + 1
 end
 
@@ -242,31 +242,26 @@ local Zagzig = {
    53, 60, 61, 54, 47, 55, 62, 63
 }
 
--- --
-local ZZ, Q = {}, {}
-
 --
-local function FillZeroes (k, n)
+local function FillZeroes (zz, k, n)
 	for i = k, k + n - 1 do
-		ZZ[i] = 0
+		zz[i] = 0
 	end
 
 	return k + n
 end
 
 --
-local function ReadMCU (get_bit, scans, preds, n, yfunc)
-	local up_to = 64
+local function ReadMCU (get_bit, scan_info, shift, cmax, yfunc)
+	local up_to, preds, dequant, zz = 64, scan_info.preds, scan_info.dequant, scan_info.zz
 
-	for i = 1, n do
-		local scan = scans[i]
-		local dht, aht, qt, hsf = scan.dht, scan.aht, scan.qt, scan.hsf
+	for i, scan in ipairs(scan_info) do
+		local dht, aht, qt, hsf, work = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work
 
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
 				--
 				local s = Decode(get_bit, dht)
-
 				local extra, r = s % 16, 0
 
 				if extra > 0 then
@@ -276,36 +271,36 @@ local function ReadMCU (get_bit, scans, preds, n, yfunc)
 				preds[i] = preds[i] + Extend(r, s)
 
 				--
-				local k, maxk, size = 1, 0, 64
+				local k, size = 1, 64
 
 				while k < 64 do
 					local nzeroes, nbits = Nybbles(Decode(get_bit, aht))
 
 					if nbits > 0 then
-						k = FillZeroes(k, nzeroes)
-						ZZ[k], k, maxk = Extend(Receive(get_bit, nbits), nbits), k + 1, k
+						k = FillZeroes(zz, k, nzeroes)
+						zz[k], k = Extend(Receive(get_bit, nbits), nbits), k + 1
 					elseif nzeroes == 0xF then
-						k = FillZeroes(k, 16)
+						k = FillZeroes(zz, k, 16)
 					else
 						local kp7 = k + 7
 
 						size = kp7 - kp7 % 8
 
-						FillZeroes(k, size - k)
+						FillZeroes(zz, k, size - k)
 
 						break
 					end
 				end
 
 				--
-				Q[1] = preds[i] * qt[1]
+				dequant[1] = preds[i] * qt[1]
 
 				for j = 1, size - 1 do
-					Q[Zagzig[j + 1] + 1] = qt[j + 1] * ZZ[j]
+					dequant[Zagzig[j + 1] + 1] = qt[j + 1] * zz[j]
 				end
 
 				for j = size, 63 do
-					Q[Zagzig[j + 1] + 1] = 0
+					dequant[Zagzig[j + 1] + 1] = 0
 				end
 
 				--
@@ -319,17 +314,17 @@ local function ReadMCU (get_bit, scans, preds, n, yfunc)
 							local cosvy = Cos[v]
 
 							for u = x, x + 7 do
-								sum, j = sum + Cos[u] * cosvy * Q[j], j + 1
+								sum, j = sum + Cos[u] * cosvy * dequant[j], j + 1
 							end
 						end
 
-						ZZ[index], index = min(max(sum + 128, 0), 255), index + 1
+						zz[index], index = min(max(sum + shift, 0), cmax), index + 1
 					end
 				end
 
 				--
 				for i = index, up_to do
-					ZZ[i] = 0
+					zz[i] = 0
 				end
 
 				up_to = index - 1
@@ -343,7 +338,7 @@ end
 
 --
 local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
-	local scans, preds = {}, {}
+	local scan_info, preds = { dequant = {}, zz = {} }, {}
 
 	for i = 1, n do
 		local comp = Component[byte(jpeg, from + 1)]
@@ -352,10 +347,11 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
 			if comp == scomp.id then
 				local di, ai = Nybbles(byte(jpeg, from + 2))
 
-				scans[i], preds[i] = {
+				scan_info[i], preds[i] = {
 					hsf = scomp.horz_samp_factor, vsf = scomp.vert_samp_factor,
 					dht = dhtables[di + 1], aht = ahtables[ai + 1],
-					qt = qtables[scomp.quantization_table + 1]
+					qt = qtables[scomp.quantization_table + 1],
+					work = {}
 				}, 0
 
 				break
@@ -365,7 +361,9 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
 		from = from + 2
 	end
 
-	return scans, preds
+	scan_info.preds = preds
+
+	return scan_info
 end
 
 -- Default yield function: no-op
@@ -419,8 +417,8 @@ local function AuxLoad (jpeg, yfunc)
 		-- Start Of Scan --
 		elseif code == 0xDA then
 			--
-			local n = byte(jpeg, from)
-			local scans, preds = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n)
+			local n, shift, cmax = byte(jpeg, from), 2^(state.nbits - 1), 2^state.nbits - 1
+			local scan_info = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n)
 
 			--
 			local get_bit, get_pos = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte)
@@ -428,7 +426,7 @@ local function AuxLoad (jpeg, yfunc)
 			local nx, ny = floor((w + hsize - 1) / hsize), floor((h + vsize - 1) / vsize)
 
 			for _ = 1, nx * ny do
-				ReadMCU(get_bit, scans, preds, n, yfunc)
+				ReadMCU(get_bit, scan_info, shift, cmax, yfunc)
 			end
 
 			next_pos = get_pos() + 1
