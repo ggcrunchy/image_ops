@@ -355,7 +355,7 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 					for ux = 1, 64, 8 do
 						local sum, j = 0, 1
 
-						for v = uy, vt do -- TODO: Can this and the x loop be switched?
+						for v = uy, vt do -- TODO: Can this and the ux loop be switched?
 							local cosvy = Cos[v]
 
 							for u = ux, ux + 7 do
@@ -374,7 +374,7 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 
 				up_to = index - 1
 
-				--
+				-- Add component to block, scale, etc.
 				-- PutAtPos(zz, ...)
 			end
 		end
@@ -409,7 +409,7 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, res
 	end
 
 	scan_info.preds = preds
-
+-- Choose appropriate synthesis function, e.g. Y() or YCbCr()...
 	return scan_info
 end
 
@@ -473,13 +473,29 @@ local function AuxLoad (jpeg, yfunc)
 			--
 			local get_bit, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
 			local hcells, vcells = state.hmax * 8, state.vmax * 8
-			local mcuw, mcuh = floor((w + hcells - 1) / hcells), floor((h + vcells - 1) / vcells)
 
 			-- Work out indexing...
+			local ybase, xstep, ystep = 0, 4 * hcells, 4 * w
 
-			for y = 1, mcuh do
-				for x = 1, mcuw do
+			for y1 = 1, h, vcells do
+				local y2 = min(y1 + vcells - 1, h)
+
+				for x1 = 1, w, hcells do
 					ProcessMCU(get_bit, scan_info, shift, cmax, yfunc)
+
+					local cbase, x2 = 1, min(x1 + hcells - 1, w)
+
+					for _ = y1, y2 do
+						local pos = ybase
+
+						for i = 1, x2 - x1 + 1 do
+							-- Synthesize(data, pos, scan_info, cbase + i) -- Write the pixel!
+
+							pos = pos + xstep
+						end
+
+						cbase, ybase = cbase + hcells, ybase + ystep
+					end
 				end
 			end
 
