@@ -35,10 +35,24 @@ local M = {}
 local function DefByteFunc () end
 
 --- DOCME
-function M.BitReader (stream, pos, on_byte)
+function M.BitReader (stream, pos, on_byte, reader_op)
 	on_byte = on_byte or DefByteFunc
 
-	local bits_read, cur_byte = 0
+	local bits_read, cur_byte, op_func = 0
+
+	if reader_op then
+		function op_func (op)
+			if op == "get_pos" or op == "get_pos_rounded_up" then
+				if op == "get_pos_rounded_up" and bits_read ~= 0 then
+					return pos + 1, 0
+				else
+					return pos, bits_read
+				end
+			elseif op == "round_up" and bits_read ~= 0 then
+				pos, bits_read = pos + 1, 0
+			end
+		end
+	end
 
 	return function(acc)
 		if bits_read == 0 then
@@ -68,10 +82,7 @@ function M.BitReader (stream, pos, on_byte)
 		end
 
 		return acc
-	end,
-	function()
-		return pos
-	end
+	end, op_func
 end
 
 -- --

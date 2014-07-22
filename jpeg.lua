@@ -242,6 +242,28 @@ local Zagzig = {
    53, 60, 61, 54, 47, 55, 62, 63
 }
 
+-- --
+local MaxMult8 = { 0, 0, 0, 0, 0, 0, 0, 0 }
+
+-- Make the array more amenable to 1-based indexing. At the same time, build a lookup table
+-- to shave off rows on sparse IDCT's.
+for i, n in ipairs(Zagzig) do
+	Zagzig[i] = n + 1
+
+	if i % 8 == 0 then
+		local slot = i * 2^-3
+		local mm8 = (MaxMult8[slot - 1] or 0) * 8
+
+		for j = i - 7, i do
+			mm8 = max(mm8, Zagzig[j])
+		end
+
+		local mm8p7 = mm8 + 7
+
+		MaxMult8[slot] = (mm8p7 - mm8p7 % 8) * 2^-3
+	end
+end
+
 --
 local function FillZeroes (zz, k, n)
 	for i = k, k + n - 1 do
@@ -251,9 +273,29 @@ local function FillZeroes (zz, k, n)
 	return k + n
 end
 
+-- --
+local Dequant = {}
+
 --
-local function ReadMCU (get_bit, scan_info, shift, cmax, yfunc)
-	local up_to, preds, dequant, zz = 64, scan_info.preds, scan_info.dequant, scan_info.zz
+local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
+	--
+	local mcus_left, preds = scan_info.left, scan_info.preds
+
+	if mcus_left == 0 then
+		for i = 1, #scan_info do
+			preds[i] = 0
+
+			-- Read marker byte (D0-D7)?
+			-- Need to consume bits?
+		end
+
+		scan_info.left = scan_info.mcus
+	elseif mcus_left then
+		scan_info.left = mcus_left - 1
+	end
+
+	--
+	local up_to, zz = 64, scan_info.zz
 
 	for i, scan in ipairs(scan_info) do
 		local dht, aht, qt, hsf, work = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work
@@ -271,7 +313,7 @@ local function ReadMCU (get_bit, scan_info, shift, cmax, yfunc)
 				preds[i] = preds[i] + Extend(r, s)
 
 				--
-				local k, size = 1, 64
+				local k, size, vadd = 1, 64, 7
 
 				while k < 64 do
 					local nzeroes, nbits = Nybbles(Decode(get_bit, aht))
@@ -285,6 +327,7 @@ local function ReadMCU (get_bit, scan_info, shift, cmax, yfunc)
 						local kp7 = k + 7
 
 						size = kp7 - kp7 % 8
+						vadd = MaxMult8[size * 2^-3] - 1
 
 						FillZeroes(zz, k, size - k)
 
@@ -293,28 +336,30 @@ local function ReadMCU (get_bit, scan_info, shift, cmax, yfunc)
 				end
 
 				--
-				dequant[1] = preds[i] * qt[1]
+				Dequant[1] = preds[i] * qt[1]
 
-				for j = 1, size - 1 do
-					dequant[Zagzig[j + 1] + 1] = qt[j + 1] * zz[j]
+				for j = 2, size do
+					Dequant[Zagzig[j]] = qt[j] * zz[j - 1]
 				end
 
-				for j = size, 63 do
-					dequant[Zagzig[j + 1] + 1] = 0
+				for j = size + 1, 64 do
+					Dequant[Zagzig[j]] = 0
 				end
 
 				--
 				local index = 1
 
-				for y = 1, size, 8 do
-					for x = 1, 64, 8 do
+				for uy = 1, size, 8 do
+					local vt = uy + vadd
+
+					for ux = 1, 64, 8 do
 						local sum, j = 0, 1
 
-						for v = y, y + 7 do
+						for v = uy, vt do -- TODO: Can this and the x loop be switched?
 							local cosvy = Cos[v]
 
-							for u = x, x + 7 do
-								sum, j = sum + Cos[u] * cosvy * dequant[j], j + 1
+							for u = ux, ux + 7 do
+								sum, j = sum + Cos[u] * cosvy * Dequant[j], j + 1
 							end
 						end
 
@@ -330,15 +375,17 @@ local function ReadMCU (get_bit, scan_info, shift, cmax, yfunc)
 				up_to = index - 1
 
 				--
-				yfunc()
+				-- PutAtPos(zz, ...)
 			end
 		end
+
+		yfunc()
 	end
 end
 
 --
-local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n)
-	local scan_info, preds = { dequant = {}, zz = {} }, {}
+local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, restart)
+	local scan_info, preds = { zz = {}, left = restart, mcus = restart }, {}
 
 	for i = 1, n do
 		local comp = Component[byte(jpeg, from + 1)]
@@ -379,6 +426,8 @@ local function AuxLoad (jpeg, yfunc)
 
 	local pos, total, ahtables, dhtables, qtables, pixels, restart = 3, #jpeg, {}, {}, {}
 
+	-- TODO: Try a string.gsub() to pre-filter the 0xFF, 0x?? combos, in particular 0xFF 0x00, stuff bytes, and restart markers
+
 	while true do
 		assert(byte(jpeg, pos) == 0xFF, "Not a segment")
 
@@ -416,20 +465,25 @@ local function AuxLoad (jpeg, yfunc)
 
 		-- Start Of Scan --
 		elseif code == 0xDA then
+
 			--
 			local n, shift, cmax = byte(jpeg, from), 2^(state.nbits - 1), 2^state.nbits - 1
-			local scan_info = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n)
+			local scan_info = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
 
 			--
-			local get_bit, get_pos = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte)
-			local hsize, vsize = state.hmax * 8, state.vmax * 8
-			local nx, ny = floor((w + hsize - 1) / hsize), floor((h + vsize - 1) / vsize)
+			local get_bit, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
+			local hcells, vcells = state.hmax * 8, state.vmax * 8
+			local mcuw, mcuh = floor((w + hcells - 1) / hcells), floor((h + vcells - 1) / vcells)
 
-			for _ = 1, nx * ny do
-				ReadMCU(get_bit, scan_info, shift, cmax, yfunc)
+			-- Work out indexing...
+
+			for y = 1, mcuh do
+				for x = 1, mcuw do
+					ProcessMCU(get_bit, scan_info, shift, cmax, yfunc)
+				end
 			end
 
-			next_pos = get_pos() + 1
+			next_pos = reader_op("get_pos_rounded_up")
 
 		-- Define Quantization table --
 		elseif code == 0xDB then
@@ -454,28 +508,28 @@ local function AuxLoad (jpeg, yfunc)
 
 	--- DOCME
 	function JPEG:ForEach (func, arg)
-	--	pixels = pixels or Decode()
+	--	pixels = pixels or Synthesize()
 
 		image_utils.ForEach(pixels, w, h, func, nil, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEach_OnRow (func, on_row, arg)
-	--	pixels = pixels or Decode()
+	--	pixels = pixels or Synthesize()
 
 		image_utils.ForEach(pixels, w, h, func, on_row, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEachInColumn (func, col, arg)
-	--	pixels = pixels or Decode()
+	--	pixels = pixels or Synthesize()
 
 		image_utils.ForEachInColumn(pixels, w, h, func, col, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEachInRow (func, row, arg)
-	--	pixels = pixels or Decode()
+	--	pixels = pixels or Synthesize()
 
 		image_utils.ForEachInRow(pixels, w, func, row, arg)
 	end
