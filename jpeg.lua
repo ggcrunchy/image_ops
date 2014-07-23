@@ -130,11 +130,13 @@ local function OnByte (cur_byte, jpeg, pos)
 		end
 	end
 end
-
+local oc=os.clock
+local decode_t, receive_t, decode_n, receive_n = 0, 0, 0, 0
+local extend_t, extend_n= 0,0
 --
 local function Decode (get_bit, ht)
 	local code = 0
-
+local t=oc()
 	for nbits = 1, 16 do
 		local symbols = ht[nbits]
 
@@ -144,6 +146,7 @@ local function Decode (get_bit, ht)
 			local min_code = symbols.min_code
 
 			if code < min_code + #symbols then
+				decode_t,decode_n=decode_t+oc()-t,decode_n+1
 				return symbols[code - min_code + 1]
 			end
 		end
@@ -152,21 +155,23 @@ end
 
 --
 local function Receive (get_bit, n)
+local t=oc()
 	local bits = 0
 
 	for _ = 1, n do
 		bits = get_bit(bits)
 	end
-
+receive_t,receive_n=receive_t+oc()-t,receive_n+1
 	return bits
 end
 
 --
 local function Extend (v, t)
+local tt = oc()
 	if v < 2^(t - 1) then
 		v = v - bnot(0xFFFFFFFF * 2^t)
 	end
-
+extend_t,extend_n=extend_t+oc()-tt,extend_n+1
 	return v
 end
 
@@ -263,33 +268,42 @@ for i, n in ipairs(Zagzig) do
 		MaxMult8[slot] = (mm8p7 - mm8p7 % 8) * 2^-3
 	end
 end
-
+local fill_t,fill_n=0,0
 --
 local function FillZeroes (zz, k, n)
+local t=oc()
 	for i = k, k + n - 1 do
 		zz[i] = 0
 	end
-
+fill_t,fill_n=fill_t+oc()-t,fill_n+1
 	return k + n
 end
 
 -- --
 local Dequant = {}
+local pmcu_t,pmcu_n=0,0
+local dri_t,dri_n=0,0
+local entropy_t,entropy_n=0,0
+local dequant_t,dequant_n=0,0
+local idct_t,idct_n=0,0
 
 --
-local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
+local Pre={}
+--
+local function ProcessMCU (get_bit, scan_info, shift, cmax, reader_op, yfunc)
+local t0=oc()
 	--
 	local mcus_left, preds = scan_info.left, scan_info.preds
 
 	if mcus_left == 0 then
+		reader_op("round_up")
+		reader_op("get_bytes", 2)
+
 		for i = 1, #scan_info do
 			preds[i] = 0
-
-			-- Read marker byte (D0-D7)?
-			-- Need to consume bits?
 		end
-
-		scan_info.left = scan_info.mcus
+dri_t,dri_n=dri_t+oc()-t0,dri_n+1
+		scan_info.left = scan_info.mcus - 1
 	elseif mcus_left then
 		scan_info.left = mcus_left - 1
 	end
@@ -299,7 +313,7 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 
 	for i, scan in ipairs(scan_info) do
 		local dht, aht, qt, hsf, work = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work
-
+local tt=oc()
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
 				--
@@ -334,7 +348,8 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 						break
 					end
 				end
-
+local ta=oc()
+entropy_t,entropy_n=entropy_t+ta-tt,entropy_n+1
 				--
 				Dequant[1] = preds[i] * qt[1]
 
@@ -345,21 +360,30 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 				for j = size + 1, 64 do
 					Dequant[Zagzig[j]] = 0
 				end
-
+local tb=oc()
+dequant_t,dequant_n=dequant_t+tb-ta,dequant_n+1
 				--
 				local index = 1
 
 				for uy = 1, size, 8 do
-					local vt = uy + vadd
+					local vt, j = uy + vadd, 1
+--[[
+					for v = uy, vt do
+						local cosvy = Cos[v]
+
+						for _ = 1, 8 do
+							Pre[j], j = cosvy * Dequant[j], j + 1
+						end
+					end]]
 
 					for ux = 1, 64, 8 do
-						local sum, j = 0, 1
+						local sum, k = 0, 1
 
 						for v = uy, vt do -- TODO: Can this and the ux loop be switched?
 							local cosvy = Cos[v]
 
 							for u = ux, ux + 7 do
-								sum, j = sum + Cos[u] * cosvy * Dequant[j], j + 1
+								sum, k = sum + Cos[u] * cosvy * Dequant[j], k + 1
 							end
 						end
 
@@ -373,7 +397,8 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 				end
 
 				up_to = index - 1
-
+tt=oc()
+idct_t,idct_n=idct_t+tt-tb,idct_n+1
 				-- Add component to block, scale, etc.
 				-- PutAtPos(zz, ...)
 			end
@@ -381,6 +406,7 @@ local function ProcessMCU (get_bit, scan_info, shift, cmax, yfunc)
 
 		yfunc()
 	end
+pmcu_t,pmcu_n=pmcu_t+oc()-t0,pmcu_n+1
 end
 
 --
@@ -427,7 +453,7 @@ local function AuxLoad (jpeg, yfunc)
 	local pos, total, ahtables, dhtables, qtables, pixels, restart = 3, #jpeg, {}, {}, {}
 
 	-- TODO: Try a string.gsub() to pre-filter the 0xFF, 0x?? combos, in particular 0xFF 0x00, stuff bytes, and restart markers
-
+local tt=oc()
 	while true do
 		assert(byte(jpeg, pos) == 0xFF, "Not a segment")
 
@@ -481,7 +507,7 @@ local function AuxLoad (jpeg, yfunc)
 				local y2 = min(y1 + vcells - 1, h)
 
 				for x1 = 1, w, hcells do
-					ProcessMCU(get_bit, scan_info, shift, cmax, yfunc)
+					ProcessMCU(get_bit, scan_info, shift, cmax, reader_op, yfunc)
 
 					local cbase, x2 = 1, min(x1 + hcells - 1, w)
 
@@ -500,7 +526,7 @@ local function AuxLoad (jpeg, yfunc)
 			end
 
 			next_pos = reader_op("get_pos_rounded_up")
-
+T1,T2=reader_op("TIMING")
 		-- Define Quantization table --
 		elseif code == 0xDB then
 			repeat
@@ -518,7 +544,19 @@ local function AuxLoad (jpeg, yfunc)
 
 		assert(pos <= total, "Incomplete or corrupt JPEG file")
 	end
+print("TOTAL", oc()-tt)
 
+print("MCU", pmcu_t, pmcu_t / pmcu_n)
+print("   RESTART INTERVAL", dri_t, dri_t / dri_n)
+print("   ENTROPY", entropy_t, entropy_t / entropy_n)
+print("        FILL ZEROES", fill_t, fill_t / fill_n)
+print("        DECODE", decode_t, decode_t / decode_n)
+print("        RECEIVE", receive_t, receive_t / receive_n)
+print("        EXTEND", extend_t, extend_t / extend_n)
+print("   DEQUANTIZE", dequant_t, dequant_t / dequant_n)
+print("   IDCT", idct_t, idct_t / idct_n)
+print("Bytes read", T1)
+print("Bits read", T2)
 	--
 	local JPEG = {}
 

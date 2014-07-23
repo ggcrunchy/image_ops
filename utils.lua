@@ -39,9 +39,10 @@ function M.BitReader (stream, pos, on_byte, want_reader_op)
 	on_byte = on_byte or DefByteFunc
 
 	local bits_read, cur_byte, op_func = 0
-
+local oc=os.clock
+local t1, t2 = 0, 0
 	if want_reader_op then
-		function op_func (op)
+		function op_func (op, arg)
 			if op == "get_pos" or op == "get_pos_rounded_up" then
 				if op == "get_pos_rounded_up" and bits_read ~= 0 then
 					return pos + 1, 0
@@ -50,11 +51,22 @@ function M.BitReader (stream, pos, on_byte, want_reader_op)
 				end
 			elseif op == "round_up" and bits_read ~= 0 then
 				pos, bits_read = pos + 1, 0
+			elseif op == "get_bytes" then
+				local from = pos
+
+				pos = pos + arg
+
+				return byte(stream, from, pos - 1)
+			elseif op == "peek_bytes" then
+				return byte(stream, pos, pos + arg - 1)
+			elseif op == "TIMING" then
+				return t1, t2
 			end
 		end
 	end
 
 	return function(acc)
+local tt=oc()
 		if bits_read == 0 then
 			cur_byte = byte(stream, pos)
 
@@ -63,7 +75,7 @@ function M.BitReader (stream, pos, on_byte, want_reader_op)
 			if new_pos then
 				pos = new_pos
 			end
-
+t1=t1+oc()-tt
 			-- ^^^ TODO: Should be able to handle e.g. stuff bytes in JPEG
 		end
 
@@ -80,7 +92,7 @@ function M.BitReader (stream, pos, on_byte, want_reader_op)
 		else
 			bits_read, pos = 0, pos + 1
 		end
-
+t2=t2+oc()-tt
 		return acc
 	end, op_func
 end
