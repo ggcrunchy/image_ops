@@ -131,65 +131,45 @@ local function OnByte (cur_byte, jpeg, pos)
 	end
 end
 local oc=os.clock
-local decode_t, receive_t, decode_n, receive_n = 0, 0, 0, 0
-local extend_t, extend_n= 0,0
 --
-local function Decode (get_bit, ht)
+local function Decode (get_bits, ht)
 	local code = 0
-local t=oc()
-	for nbits = 1, 16 do
+
+	for nbits = 1, #ht do
 		local symbols = ht[nbits]
 
-		code = get_bit(code)
+		code = get_bits(code, symbols.nbits)
 
-		if symbols then
-			local min_code = symbols.min_code
-
-			if code < min_code + #symbols then
-				decode_t,decode_n=decode_t+oc()-t,decode_n+1
-				return symbols[code - min_code + 1]
-			end
+		if code < symbols.beyond then
+			return symbols[code - symbols.offset]
 		end
 	end
 end
 
 --
-local function Receive (get_bit, n)
-local t=oc()
-	local bits = 0
-
-	for _ = 1, n do
-		bits = get_bit(bits)
-	end
-receive_t,receive_n=receive_t+oc()-t,receive_n+1
-	return bits
-end
-
---
 local function Extend (v, t)
-local tt = oc()
 	if v < 2^(t - 1) then
 		v = v - bnot(0xFFFFFFFF * 2^t)
 	end
-extend_t,extend_n=extend_t+oc()-tt,extend_n+1
+
 	return v
 end
 
 --
 local function DHT (jpeg, from)
-	local ht, spos, code = {}, from + 17, 0
+	local ht, spos, code, prev = {}, from + 17, 0, 0
 
 	for i = 1, 16 do
 		local n = byte(jpeg, from + i)
 
 		if n > 0 then
-			local symbols = { min_code = code }
+			local symbols = { nbits = i - prev, offset = code - 1, beyond = code + n }
 
 			for j = 1, n do
 				symbols[j], spos = byte(jpeg, spos), spos + 1
 			end
 
-			ht[i], code = symbols, code + n
+			ht[#ht + 1], code, prev = symbols, code + n, i
 		end
 
 		code = 2 * code
@@ -219,11 +199,9 @@ local function DQT (jpeg, from, qbyte)
 end
 
 -- --
-local Cos = {}
+local Cos, Sqrt2_2 = {}, .25 * math.sqrt(2)
 
 do
-	local Sqrt2_2 = .25 * math.sqrt(2)
-
 	for x = 0, 7 do
 		local k = 2 * x + 1
 
@@ -247,50 +225,32 @@ local Zagzig = {
    53, 60, 61, 54, 47, 55, 62, 63
 }
 
--- --
-local MaxMult8 = { 0, 0, 0, 0, 0, 0, 0, 0 }
-
--- Make the array more amenable to 1-based indexing. At the same time, build a lookup table
--- to shave off rows on sparse IDCT's.
+-- Make the array more amenable to 1-based indexing.
 for i, n in ipairs(Zagzig) do
 	Zagzig[i] = n + 1
-
-	if i % 8 == 0 then
-		local slot = i * 2^-3
-		local mm8 = (MaxMult8[slot - 1] or 0) * 8
-
-		for j = i - 7, i do
-			mm8 = max(mm8, Zagzig[j])
-		end
-
-		local mm8p7 = mm8 + 7
-
-		MaxMult8[slot] = (mm8p7 - mm8p7 % 8) * 2^-3
-	end
 end
-local fill_t,fill_n=0,0
+
 --
 local function FillZeroes (zz, k, n)
-local t=oc()
 	for i = k, k + n - 1 do
 		zz[i] = 0
 	end
-fill_t,fill_n=fill_t+oc()-t,fill_n+1
+
 	return k + n
 end
 
 -- --
 local Dequant = {}
 local pmcu_t,pmcu_n=0,0
-local dri_t,dri_n=0,0
 local entropy_t,entropy_n=0,0
-local dequant_t,dequant_n=0,0
 local idct_t,idct_n=0,0
+local a_t,a_n=0,0
+
+-- --
+local QU = {}
 
 --
-local Pre={}
---
-local function ProcessMCU (get_bit, scan_info, shift, cmax, reader_op, yfunc)
+local function ProcessMCU (get_bits, scan_info, shift, cmax, reader_op, yfunc)
 local t0=oc()
 	--
 	local mcus_left, preds = scan_info.left, scan_info.preds
@@ -302,14 +262,14 @@ local t0=oc()
 		for i = 1, #scan_info do
 			preds[i] = 0
 		end
-dri_t,dri_n=dri_t+oc()-t0,dri_n+1
+
 		scan_info.left = scan_info.mcus - 1
 	elseif mcus_left then
 		scan_info.left = mcus_left - 1
 	end
 
 	--
-	local up_to, zz = 64, scan_info.zz
+	local zz = scan_info.zz
 
 	for i, scan in ipairs(scan_info) do
 		local dht, aht, qt, hsf, work = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work
@@ -317,39 +277,39 @@ local tt=oc()
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
 				--
-				local s = Decode(get_bit, dht)
+				local s = Decode(get_bits, dht)
 				local extra, r = s % 16, 0
 
 				if extra > 0 then
-					r = Receive(get_bit, extra)
+					r = get_bits(0, extra)
 				end
 
 				preds[i] = preds[i] + Extend(r, s)
 
 				--
-				local k, size, vadd = 1, 64, 7
+				local k, size = 1, 64
 
 				while k < 64 do
-					local nzeroes, nbits = Nybbles(Decode(get_bit, aht))
+					local nzeroes, nbits = Nybbles(Decode(get_bits, aht))
 
 					if nbits > 0 then
+local tk=oc()
 						k = FillZeroes(zz, k, nzeroes)
-						zz[k], k = Extend(Receive(get_bit, nbits), nbits), k + 1
+						zz[k], k = Extend(get_bits(0, nbits), nbits), k + 1
+a_t,a_n=a_t+oc()-tk,a_n+1
 					elseif nzeroes == 0xF then
 						k = FillZeroes(zz, k, 16)
 					else
 						local kp7 = k + 7
 
 						size = kp7 - kp7 % 8
-						vadd = MaxMult8[size * 2^-3] - 1
 
 						FillZeroes(zz, k, size - k)
 
 						break
 					end
 				end
-local ta=oc()
-entropy_t,entropy_n=entropy_t+ta-tt,entropy_n+1
+entropy_t,entropy_n=entropy_t+oc()-tt,entropy_n+1
 				--
 				Dequant[1] = preds[i] * qt[1]
 
@@ -361,50 +321,52 @@ entropy_t,entropy_n=entropy_t+ta-tt,entropy_n+1
 					Dequant[Zagzig[j]] = 0
 				end
 local tb=oc()
-dequant_t,dequant_n=dequant_t+tb-ta,dequant_n+1
+				--
+				local qi = 1
+
+				for ux = 1, 64, 8 do
+					for j = 1, 64, 8 do
+						QU[qi], qi = Dequant[j] * Sqrt2_2 +
+									 Dequant[j + 1] * Cos[ux + 1] +
+									 Dequant[j + 2] * Cos[ux + 2] +
+									 Dequant[j + 3] * Cos[ux + 3] +
+									 Dequant[j + 4] * Cos[ux + 4] +
+									 Dequant[j + 5] * Cos[ux + 5] +
+									 Dequant[j + 6] * Cos[ux + 6] +
+									 Dequant[j + 7] * Cos[ux + 7], qi + 1
+					end
+
+					QU[ux] = QU[ux] * Sqrt2_2
+				end
+
 				--
 				local index = 1
 
 				for uy = 1, size, 8 do
-					local vt, j = uy + vadd, 1
---[[
-					for v = uy, vt do
-						local cosvy = Cos[v]
-
-						for _ = 1, 8 do
-							Pre[j], j = cosvy * Dequant[j], j + 1
-						end
-					end]]
-
 					for ux = 1, 64, 8 do
-						local sum, k = 0, 1
-
-						for v = uy, vt do -- TODO: Can this and the ux loop be switched?
-							local cosvy = Cos[v]
-
-							for u = ux, ux + 7 do
-								sum, k = sum + Cos[u] * cosvy * Dequant[j], k + 1
-							end
-						end
-
-						zz[index], index = min(max(sum + shift, 0), cmax), index + 1
+						zz[index], index = QU[ux] +
+										   Cos[uy + 1] * QU[ux + 1] +
+										   Cos[uy + 2] * QU[ux + 2] +
+										   Cos[uy + 3] * QU[ux + 3] +
+										   Cos[uy + 4] * QU[ux + 4] +
+										   Cos[uy + 5] * QU[ux + 5] +
+										   Cos[uy + 6] * QU[ux + 6] +
+										   Cos[uy + 7] * QU[ux + 7], index + 1--sum--[[min(max(sum + shift, 0), cmax)]]
 					end
 				end
 
 				--
-				for i = index, up_to do
+				for i = index, 64 do
 					zz[i] = 0
 				end
-
-				up_to = index - 1
 tt=oc()
 idct_t,idct_n=idct_t+tt-tb,idct_n+1
 				-- Add component to block, scale, etc.
 				-- PutAtPos(zz, ...)
 			end
-		end
 
-		yfunc()
+			yfunc()
+		end
 	end
 pmcu_t,pmcu_n=pmcu_t+oc()-t0,pmcu_n+1
 end
@@ -452,7 +414,6 @@ local function AuxLoad (jpeg, yfunc)
 
 	local pos, total, ahtables, dhtables, qtables, pixels, restart = 3, #jpeg, {}, {}, {}
 
-	-- TODO: Try a string.gsub() to pre-filter the 0xFF, 0x?? combos, in particular 0xFF 0x00, stuff bytes, and restart markers
 local tt=oc()
 	while true do
 		assert(byte(jpeg, pos) == 0xFF, "Not a segment")
@@ -465,6 +426,9 @@ local tt=oc()
 
 		local from, len = pos + 4, ReadU16(jpeg, pos + 2)
 		local next_pos = pos + len + 2
+
+		--
+		yfunc()
 
 		-- Start Of Frame --
 		if code == 0xC0 or code == 0xC1 then
@@ -497,7 +461,7 @@ local tt=oc()
 			local scan_info = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
 
 			--
-			local get_bit, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
+			local get_bits, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
 			local hcells, vcells = state.hmax * 8, state.vmax * 8
 
 			-- Work out indexing...
@@ -507,7 +471,7 @@ local tt=oc()
 				local y2 = min(y1 + vcells - 1, h)
 
 				for x1 = 1, w, hcells do
-					ProcessMCU(get_bit, scan_info, shift, cmax, reader_op, yfunc)
+					ProcessMCU(get_bits, scan_info, shift, cmax, reader_op, yfunc)
 
 					local cbase, x2 = 1, min(x1 + hcells - 1, w)
 
@@ -526,7 +490,7 @@ local tt=oc()
 			end
 
 			next_pos = reader_op("get_pos_rounded_up")
-T1,T2=reader_op("TIMING")
+
 		-- Define Quantization table --
 		elseif code == 0xDB then
 			repeat
@@ -547,16 +511,10 @@ T1,T2=reader_op("TIMING")
 print("TOTAL", oc()-tt)
 
 print("MCU", pmcu_t, pmcu_t / pmcu_n)
-print("   RESTART INTERVAL", dri_t, dri_t / dri_n)
 print("   ENTROPY", entropy_t, entropy_t / entropy_n)
-print("        FILL ZEROES", fill_t, fill_t / fill_n)
-print("        DECODE", decode_t, decode_t / decode_n)
-print("        RECEIVE", receive_t, receive_t / receive_n)
-print("        EXTEND", extend_t, extend_t / extend_n)
-print("   DEQUANTIZE", dequant_t, dequant_t / dequant_n)
+print("      a", a_t, a_t / a_n)
 print("   IDCT", idct_t, idct_t / idct_n)
-print("Bytes read", T1)
-print("Bits read", T2)
+
 	--
 	local JPEG = {}
 

@@ -28,8 +28,16 @@ local byte = string.byte
 local open = io.open
 local sub = string.sub
 
+-- Modules --
+local operators = require("bitwise_ops.operators")
+
 -- Exports --
 local M = {}
+
+--
+if operators.HasBitLib() then
+	-- Fanciness
+end
 
 --
 local function DefByteFunc () end
@@ -38,9 +46,8 @@ local function DefByteFunc () end
 function M.BitReader (stream, pos, on_byte, want_reader_op)
 	on_byte = on_byte or DefByteFunc
 
-	local bits_read, cur_byte, op_func = 0
-local oc=os.clock
-local t1, t2 = 0, 0
+	local bits_read, bit, cur_byte, op_func = 0
+
 	if want_reader_op then
 		function op_func (op, arg)
 			if op == "get_pos" or op == "get_pos_rounded_up" then
@@ -59,40 +66,48 @@ local t1, t2 = 0, 0
 				return byte(stream, from, pos - 1)
 			elseif op == "peek_bytes" then
 				return byte(stream, pos, pos + arg - 1)
-			elseif op == "TIMING" then
-				return t1, t2
 			end
 		end
 	end
 
-	return function(acc)
-local tt=oc()
-		if bits_read == 0 then
-			cur_byte = byte(stream, pos)
-
-			local new_pos = on_byte(cur_byte, stream, pos)
-
-			if new_pos then
-				pos = new_pos
+	return function(acc, n)
+		--
+		while n + bits_read >= 8 do
+			if bits_read == 0 then
+				cur_byte = byte(stream, pos)
+				pos = on_byte(cur_byte, stream, pos) or pos
 			end
-t1=t1+oc()-tt
-			-- ^^^ TODO: Should be able to handle e.g. stuff bytes in JPEG
+
+			local left = 8 - bits_read
+
+			acc, n, bits_read, pos = 2^left * acc + cur_byte, n - left, 0, pos + 1
 		end
 
-		acc = 2 * acc
+		--
+		for _ = 1, n do
+			acc = 2 * acc
 
-		if cur_byte >= 0x80 then
-			cur_byte, acc = cur_byte - 0x80, acc + 1
+			if bits_read > 0 then
+				if bits_read < 7 then
+					bit, bits_read = .5 * bit, bits_read + 1
+
+					if cur_byte >= bit then
+						cur_byte, acc = cur_byte - bit, acc + 1
+					end
+				else
+					acc, bits_read, pos = acc + cur_byte, 0, pos + 1
+				end
+			else
+				cur_byte, bit, bits_read = byte(stream, pos), 0x80, 1
+				pos = on_byte(cur_byte, stream, pos) or pos
+
+				-- ^^^ TODO: Should be able to handle e.g. stuff bytes in JPEG
+				if cur_byte >= 0x80 then
+					cur_byte, acc = cur_byte - 0x80, acc + 1
+				end
+			end
 		end
 
-		cur_byte = 2 * cur_byte
-
-		if bits_read < 7 then
-			bits_read = bits_read + 1
-		else
-			bits_read, pos = 0, pos + 1
-		end
-t2=t2+oc()-tt
 		return acc
 	end, op_func
 end
