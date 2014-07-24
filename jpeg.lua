@@ -249,7 +249,7 @@ local kk, kn=0,0
 local QU = {}
 
 --
-local function ProcessMCU (get_bits, scan_info, shift, cmax, reader_op, yfunc)
+local function ProcessMCU (get_bits, scan_info, shift, reader_op, yfunc)
 local t0=oc()
 	--
 	local mcus_left, preds = scan_info.left, scan_info.preds
@@ -333,7 +333,7 @@ kk,kn=kk+k,kn+1
 
 				-- ^^^ Possible way to precalculate in the cos coefficients:
 				-- Zigzag[j] refers to first of 8 values in Dequant (with spacing of... 64? would then require no changes...)
-				-- Do `% 8`, etc. on result to figure out row, column
+				-- Do `% 8`, etc. on result to figure out row, column (alternatively, step the zagzig algorithmically)
 				-- If in first column (including DC) multiply by Sqrt2_2 each
 				-- Else multiply by Cos[u + col - 1], Cos[u + col + 8 - 1], ...
 				-- Lookups in below step would be far fewer
@@ -341,7 +341,7 @@ kk,kn=kk+k,kn+1
 				-- Problem: naive approach might waste a lot of effort zeroing Dequant
 				-- Idea: Keep "largest column" per row, zero until previous limit
 				-- Since only used in next step, can assume further elements are 0 (even across components and MCU's)
-				-- ^^ Observed: simple image = avg of 21.93; complex image = 39.79
+				-- ^^ Observed non-zeroes (out of 64): simple image = avg of 21.93; complex image = 39.79
 local tb=oc()
 				--
 				local qi = 1
@@ -360,7 +360,7 @@ local tb=oc()
 							g * Dequant[j + 7], qi + 1
 					end
 
-					QU[u] = QU[u] * Sqrt2_2
+					QU[u] = QU[u] * Sqrt2_2 + shift
 				end
 
 				--
@@ -397,9 +397,31 @@ idct_t,idct_n=idct_t+oc()-tb,idct_n+1
 pmcu_t,pmcu_n=pmcu_t+oc()-t0,pmcu_n+1
 end
 
+-- --
+local Synth = {}
+
+--
+function Synth.YCbCr (data, pos, scan_info, base, run, step, cmax)
+	local y_work, cb_work, cr_work = scan_info[1].work, scan_info[2].work, scan_info[3].work
+
+	for i = base + 1, base + run do
+		local y = min(max(0, y_work[i]), cmax)
+		local cb = min(max(0, cb_work[i]), cmax)
+		local cr = min(max(0, cr_work[i]), cmax)
+
+		local r = floor(cr * (2 - 2 * .299) + y) + 128
+		local b = floor(cb * (2 - 2 * .114) + y) + 128
+		local g = floor((y - .114 * b - .299 * r) * (1 / .587)) + 128
+
+		data[pos], data[pos + 1], data[pos + 2], data[pos + 3] = r, g, b, 1
+
+		pos = pos + step
+	end
+end
+
 --
 local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, restart)
-	local scan_info, preds = { zz = {}, left = restart, mcus = restart }, {}
+	local scan_info, preds, synth = { zz = {}, left = restart, mcus = restart }, {}, ""
 
 	for i = 1, n do
 		local comp = Component[byte(jpeg, from + 1)]
@@ -414,17 +436,21 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, res
 					qt = qtables[scomp.quantization_table + 1],
 					work = {}
 				}, 0
-
+				-- TODO: hreps, vreps
+for j = 1, 400 do
+	scan_info[i].work[j]=0
+end
 				break
 			end
 		end
 
-		from = from + 2
+		from, synth = from + 2, synth .. comp
 	end
 
+	--
 	scan_info.preds = preds
--- Choose appropriate synthesis function, e.g. Y() or YCbCr()...
-	return scan_info
+
+	return scan_info, assert(Synth[synth], "No synthesize method available")
 end
 
 -- Default yield function: no-op
@@ -481,10 +507,11 @@ local tt=oc()
 
 		-- Start Of Scan --
 		elseif code == 0xDA then
+			pixels = pixels or {}
 
 			--
 			local n, shift, cmax = byte(jpeg, from), 2^(state.nbits - 1), 2^state.nbits - 1
-			local scan_info = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
+			local scan_info, synth = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
 
 			--
 			local get_bits, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
@@ -497,18 +524,13 @@ local tt=oc()
 				local y2 = min(y1 + vcells - 1, h)
 
 				for x1 = 1, w, hcells do
-					ProcessMCU(get_bits, scan_info, shift, cmax, reader_op, yfunc)
+					ProcessMCU(get_bits, scan_info, shift, reader_op, yfunc)
 
 					local cbase, x2 = 1, min(x1 + hcells - 1, w)
+					local run = x2 - x1 + 1
 
 					for _ = y1, y2 do
-						local pos = ybase
-
-						for i = 1, x2 - x1 + 1 do
-							-- Synthesize(data, pos, scan_info, cbase + i) -- Write the pixel!
-
-							pos = pos + xstep
-						end
+						synth(pixels, ybase, scan_info, cbase, run, xstep, cmax)
 
 						cbase, ybase = cbase + hcells, ybase + ystep
 					end
