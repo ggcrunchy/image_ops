@@ -244,8 +244,7 @@ local Dequant = {}
 local pmcu_t,pmcu_n=0,0
 local entropy_t,entropy_n=0,0
 local idct_t,idct_n=0,0
-local a_t,a_n=0,0
-
+local kk, kn=0,0
 -- --
 local QU = {}
 
@@ -273,9 +272,10 @@ local t0=oc()
 
 	for i, scan in ipairs(scan_info) do
 		local dht, aht, qt, hsf, work = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work
-local tt=oc()
+
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
+local tt=oc()
 				--
 				local s = Decode(get_bits, dht)
 				local extra, r = s % 16, 0
@@ -290,21 +290,25 @@ local tt=oc()
 				local k, size = 1, 64
 
 				while k < 64 do
-					local nzeroes, nbits = Nybbles(Decode(get_bits, aht))
+					local zb = Decode(get_bits, aht)
 
-					if nbits > 0 then
-local tk=oc()
-						k = FillZeroes(zz, k, nzeroes)
-						zz[k], k = Extend(get_bits(0, nbits), nbits), k + 1
-a_t,a_n=a_t+oc()-tk,a_n+1
-					elseif nzeroes == 0xF then
-						k = FillZeroes(zz, k, 16)
+					if zb > 0 then
+						if zb < 16 then
+							zz[k], k = Extend(get_bits(0, zb), zb), k + 1
+						elseif zb ~= 0xF0 then
+							local nzeroes, nbits = Nybbles(zb)
+
+							k = FillZeroes(zz, k, nzeroes)
+							zz[k], k = Extend(get_bits(0, nbits), nbits), k + 1
+						else
+							k = FillZeroes(zz, k, 16)
+						end
 					else
 						local kp7 = k + 7
 
 						size = kp7 - kp7 % 8
 
-						FillZeroes(zz, k, size - k)
+					--	FillZeroes(zz, k, size - k)
 
 						break
 					end
@@ -313,45 +317,67 @@ entropy_t,entropy_n=entropy_t+oc()-tt,entropy_n+1
 				--
 				Dequant[1] = preds[i] * qt[1]
 
-				for j = 2, size do
-					Dequant[Zagzig[j]] = qt[j] * zz[j - 1]
-				end
+				-- for j = 1, 64 * 64, 64 ?
+				--		pqt * Sqrt2_2
+				-- Row1.limit = 1 (or 8?)
 
-				for j = size + 1, 64 do
+				for j = 2, k do--size do
+					local at, dq = Zagzig[j], qt[j] * zz[j - 1]
+
+					Dequant[at] = dq
+				end
+kk,kn=kk+k,kn+1
+				for j = k--[[size]] + 1, 64 do
 					Dequant[Zagzig[j]] = 0
 				end
+
+				-- ^^^ Possible way to precalculate in the cos coefficients:
+				-- Zigzag[j] refers to first of 8 values in Dequant (with spacing of... 64? would then require no changes...)
+				-- Do `% 8`, etc. on result to figure out row, column
+				-- If in first column (including DC) multiply by Sqrt2_2 each
+				-- Else multiply by Cos[u + col - 1], Cos[u + col + 8 - 1], ...
+				-- Lookups in below step would be far fewer
+				-- If matrices typically sparse, ought to incur FAR fewer multiplications and lookups overall
+				-- Problem: naive approach might waste a lot of effort zeroing Dequant
+				-- Idea: Keep "largest column" per row, zero until previous limit
+				-- Since only used in next step, can assume further elements are 0 (even across components and MCU's)
+				-- ^^ Observed: simple image = avg of 21.93; complex image = 39.79
 local tb=oc()
 				--
 				local qi = 1
 
-				for ux = 1, 64, 8 do
+				for u = 1, 64, 8 do
+					local a, b, c, d, e, f, g = Cos[u + 1], Cos[u + 2], Cos[u + 3], Cos[u + 4], Cos[u + 5], Cos[u + 6], Cos[u + 7]
+
 					for j = 1, 64, 8 do
 						QU[qi], qi = Dequant[j] * Sqrt2_2 +
-									 Dequant[j + 1] * Cos[ux + 1] +
-									 Dequant[j + 2] * Cos[ux + 2] +
-									 Dequant[j + 3] * Cos[ux + 3] +
-									 Dequant[j + 4] * Cos[ux + 4] +
-									 Dequant[j + 5] * Cos[ux + 5] +
-									 Dequant[j + 6] * Cos[ux + 6] +
-									 Dequant[j + 7] * Cos[ux + 7], qi + 1
+							a * Dequant[j + 1] +
+							b * Dequant[j + 2] +
+							c * Dequant[j + 3] +
+							d * Dequant[j + 4] +
+							e * Dequant[j + 5] +
+							f * Dequant[j + 6] +
+							g * Dequant[j + 7], qi + 1
 					end
 
-					QU[ux] = QU[ux] * Sqrt2_2
+					QU[u] = QU[u] * Sqrt2_2
 				end
 
 				--
 				local index = 1
 
-				for uy = 1, size, 8 do
-					for ux = 1, 64, 8 do
-						zz[index], index = QU[ux] +
-										   Cos[uy + 1] * QU[ux + 1] +
-										   Cos[uy + 2] * QU[ux + 2] +
-										   Cos[uy + 3] * QU[ux + 3] +
-										   Cos[uy + 4] * QU[ux + 4] +
-										   Cos[uy + 5] * QU[ux + 5] +
-										   Cos[uy + 6] * QU[ux + 6] +
-										   Cos[uy + 7] * QU[ux + 7], index + 1--sum--[[min(max(sum + shift, 0), cmax)]]
+				for v = 1, size, 8 do
+					local a, b, c, d, e, f, g = Cos[v + 1], Cos[v + 2], Cos[v + 3], Cos[v + 4], Cos[v + 5], Cos[v + 6], Cos[v + 7]
+ 
+					for u = 1, 64, 8 do
+						zz[index], index = QU[u] +
+							a * QU[u + 1] +
+							b * QU[u + 2] +
+							c * QU[u + 3] +
+							d * QU[u + 4] +
+							e * QU[u + 5] +
+							f * QU[u + 6] +
+							g * QU[u + 7], index + 1 --[[min(max(sum + shift, 0), cmax)]]
 					end
 				end
 
@@ -359,8 +385,8 @@ local tb=oc()
 				for i = index, 64 do
 					zz[i] = 0
 				end
-tt=oc()
-idct_t,idct_n=idct_t+tt-tb,idct_n+1
+
+idct_t,idct_n=idct_t+oc()-tb,idct_n+1
 				-- Add component to block, scale, etc.
 				-- PutAtPos(zz, ...)
 			end
@@ -512,9 +538,8 @@ print("TOTAL", oc()-tt)
 
 print("MCU", pmcu_t, pmcu_t / pmcu_n)
 print("   ENTROPY", entropy_t, entropy_t / entropy_n)
-print("      a", a_t, a_t / a_n)
 print("   IDCT", idct_t, idct_t / idct_n)
-
+print("Average occupancy", kk / kn)
 	--
 	local JPEG = {}
 

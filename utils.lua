@@ -25,28 +25,28 @@
 
 -- Standard library imports --
 local byte = string.byte
+local floor = math.floor
 local open = io.open
 local sub = string.sub
-
--- Modules --
-local operators = require("bitwise_ops.operators")
 
 -- Exports --
 local M = {}
 
 --
-if operators.HasBitLib() then
-	-- Fanciness
-end
-
---
 local function DefByteFunc () end
+
+-- --
+local SHL, SHR = {}, {}
+
+for i = 1, 8 do
+	SHL[i], SHR[i] = 2^i, 2^-i
+end
 
 --- DOCME
 function M.BitReader (stream, pos, on_byte, want_reader_op)
 	on_byte = on_byte or DefByteFunc
 
-	local bits_read, bit, cur_byte, op_func = 0
+	local bits_read, cur_byte, op_func = 0
 
 	if want_reader_op then
 		function op_func (op, arg)
@@ -72,7 +72,9 @@ function M.BitReader (stream, pos, on_byte, want_reader_op)
 
 	return function(acc, n)
 		--
-		while n + bits_read >= 8 do
+		local up_to = n + bits_read
+
+		while up_to >= 8 do
 			if bits_read == 0 then
 				cur_byte = byte(stream, pos)
 				pos = on_byte(cur_byte, stream, pos) or pos
@@ -80,39 +82,29 @@ function M.BitReader (stream, pos, on_byte, want_reader_op)
 
 			local left = 8 - bits_read
 
-			acc, n, bits_read, pos = 2^left * acc + cur_byte, n - left, 0, pos + 1
+			acc, n = SHL[left] * acc + cur_byte, n - left
+			up_to, bits_read, pos = n, 0, pos + 1
 		end
 
 		--
-		for _ = 1, n do
-			acc = 2 * acc
-
-			if bits_read > 0 then
-				if bits_read < 7 then
-					bit, bits_read = .5 * bit, bits_read + 1
-
-					if cur_byte >= bit then
-						cur_byte, acc = cur_byte - bit, acc + 1
-					end
-				else
-					acc, bits_read, pos = acc + cur_byte, 0, pos + 1
-				end
-			else
-				cur_byte, bit, bits_read = byte(stream, pos), 0x80, 1
+		if n > 0 then
+			if bits_read == 0 then
+				cur_byte = byte(stream, pos)
 				pos = on_byte(cur_byte, stream, pos) or pos
 
 				-- ^^^ TODO: Should be able to handle e.g. stuff bytes in JPEG
-				if cur_byte >= 0x80 then
-					cur_byte, acc = cur_byte - 0x80, acc + 1
-				end
 			end
+
+			local left = 8 - up_to
+			local top = floor(cur_byte * SHR[left])
+
+			acc = SHL[n] * acc + top
+			cur_byte, bits_read = cur_byte - top * SHL[left], bits_read + n
 		end
 
 		return acc
 	end, op_func
 end
-
--- ^^^ TODO: Might benefit from special version if bit ops are present
 
 --
 local DefRowFunc = DefByteFunc
