@@ -230,10 +230,13 @@ for i, n in ipairs(Zagzig) do
 	Zagzig[i] = n + 1
 end
 
+-- --
+local ZZ = {}
+
 --
-local function FillZeroes (zz, k, n)
+local function FillZeroes (k, n)
 	for i = k, k + n - 1 do
-		zz[i] = 0
+		ZZ[i] = 0
 	end
 
 	return k + n
@@ -268,10 +271,8 @@ local t0=oc()
 	end
 
 	--
-	local zz = scan_info.zz
-
 	for i, scan in ipairs(scan_info) do
-		local dht, aht, qt, hsf, work = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work
+		local dht, aht, qt, hsf, work, wpos = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work, 1
 
 		for y = 1, scan.vsf do
 			for x = 1, hsf do
@@ -294,14 +295,14 @@ local tt=oc()
 
 					if zb > 0 then
 						if zb < 16 then
-							zz[k], k = Extend(get_bits(0, zb), zb), k + 1
+							ZZ[k], k = Extend(get_bits(0, zb), zb), k + 1
 						elseif zb ~= 0xF0 then
 							local nzeroes, nbits = Nybbles(zb)
 
-							k = FillZeroes(zz, k, nzeroes)
-							zz[k], k = Extend(get_bits(0, nbits), nbits), k + 1
+							k = FillZeroes(k, nzeroes)
+							ZZ[k], k = Extend(get_bits(0, nbits), nbits), k + 1
 						else
-							k = FillZeroes(zz, k, 16)
+							k = FillZeroes(k, 16)
 						end
 					else
 						local kp7 = k + 7
@@ -322,7 +323,7 @@ entropy_t,entropy_n=entropy_t+oc()-tt,entropy_n+1
 				-- Row1.limit = 1 (or 8?)
 
 				for j = 2, k do--size do
-					local at, dq = Zagzig[j], qt[j] * zz[j - 1]
+					local at, dq = Zagzig[j], qt[j] * ZZ[j - 1]
 
 					Dequant[at] = dq
 				end
@@ -364,26 +365,26 @@ local tb=oc()
 				end
 
 				--
-				local index = 1
+				local up_to = wpos + 64
 
 				for v = 1, size, 8 do
 					local a, b, c, d, e, f, g = Cos[v + 1], Cos[v + 2], Cos[v + 3], Cos[v + 4], Cos[v + 5], Cos[v + 6], Cos[v + 7]
  
 					for u = 1, 64, 8 do
-						zz[index], index = QU[u] +
+						work[wpos], wpos = QU[u] +
 							a * QU[u + 1] +
 							b * QU[u + 2] +
 							c * QU[u + 3] +
 							d * QU[u + 4] +
 							e * QU[u + 5] +
 							f * QU[u + 6] +
-							g * QU[u + 7], index + 1 --[[min(max(sum + shift, 0), cmax)]]
+							g * QU[u + 7], wpos + 1
 					end
 				end
 
 				--
-				for i = index, 64 do
-					zz[i] = 0
+				while wpos < up_to do
+					work[wpos], wpos = 0, wpos + 1
 				end
 
 idct_t,idct_n=idct_t+oc()-tb,idct_n+1
@@ -401,17 +402,16 @@ end
 local Synth = {}
 
 --
-function Synth.YCbCr (data, pos, scan_info, base, run, step, cmax)
+function Synth.YCbCr8 (data, pos, scan_info, base, run, step)
 	local y_work, cb_work, cr_work = scan_info[1].work, scan_info[2].work, scan_info[3].work
 
 	for i = base + 1, base + run do
-		local y = min(max(0, y_work[i]), cmax)
-		local cb = min(max(0, cb_work[i]), cmax)
-		local cr = min(max(0, cr_work[i]), cmax)
-
+		local y = min(max(0, y_work[i]), 255)
+		local cb = min(max(0, cb_work[i]), 255)
+		local cr = min(max(0, cr_work[i]), 255)
 		local r = floor(cr * (2 - 2 * .299) + y) + 128
 		local b = floor(cb * (2 - 2 * .114) + y) + 128
-		local g = floor((y - .114 * b - .299 * r) * (1 / .587)) + 128
+		local g = floor((y - .114 * b - .299 * r) / .587) + 128
 
 		data[pos], data[pos + 1], data[pos + 2], data[pos + 3] = r, g, b, 1
 
@@ -421,7 +421,7 @@ end
 
 --
 local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, restart)
-	local scan_info, preds, synth = { zz = {}, left = restart, mcus = restart }, {}, ""
+	local scan_info, preds, synth = { left = restart, mcus = restart }, {}, ""
 
 	for i = 1, n do
 		local comp = Component[byte(jpeg, from + 1)]
@@ -437,9 +437,11 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, res
 					work = {}
 				}, 0
 				-- TODO: hreps, vreps
+---[[
 for j = 1, 400 do
 	scan_info[i].work[j]=0
 end
+--]]
 				break
 			end
 		end
@@ -450,7 +452,7 @@ end
 	--
 	scan_info.preds = preds
 
-	return scan_info, assert(Synth[synth], "No synthesize method available")
+	return scan_info, assert(Synth[synth .. state.nbits], "No synthesize method available")
 end
 
 -- Default yield function: no-op
@@ -510,7 +512,7 @@ local tt=oc()
 			pixels = pixels or {}
 
 			--
-			local n, shift, cmax = byte(jpeg, from), 2^(state.nbits - 1), 2^state.nbits - 1
+			local n, shift = byte(jpeg, from), 2^(state.nbits - 1)
 			local scan_info, synth = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
 
 			--
@@ -530,7 +532,7 @@ local tt=oc()
 					local run = x2 - x1 + 1
 
 					for _ = y1, y2 do
-						synth(pixels, ybase, scan_info, cbase, run, xstep, cmax)
+						synth(pixels, ybase, scan_info, cbase, run, xstep)
 
 						cbase, ybase = cbase + hcells, ybase + ystep
 					end
