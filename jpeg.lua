@@ -320,7 +320,7 @@ local tt=oc()
 
 					size = kp7 - kp7 % 8
 
-				--	FillZeroes(zz, k, size - k)
+				--	FillZeroes(k, size - k)
 
 					break
 				end
@@ -378,7 +378,7 @@ local tb=oc()
 			--
 			local up_to = wpos + 64
 
-			for v = 1, size, 8 do
+			for v = 1, 64, 8 do--size, 8 do
 				local a, b, c, d, e, f, g = Cos[v + 1], Cos[v + 2], Cos[v + 3], Cos[v + 4], Cos[v + 5], Cos[v + 6], Cos[v + 7]
 
 				for u = 1, 64, 8 do
@@ -425,19 +425,27 @@ end
 local Synth = {}
 
 --
-function Synth.YCbCr (data, pos, scan_info, base, run)
+function Synth.YCbCr (data, pos, scan_info, base, run, from)
 	local y_work, cb_work, cr_work = scan_info[1].work, scan_info[2].work, scan_info[3].work
 
-	for i = base + 1, base + run do
-		local y = y_work[i]
-		local r = floor(cr_work[i] * (2 - 2 * .299) + y) + 128
-		local b = floor(cb_work[i] * (2 - 2 * .114) + y) + 128
-		local g = floor((y - .114 * b - .299 * r) / .587) + 128
+	for i = 1, run, 8 do
+		for j = from, from + min(7, run - i) do
+			local at = base + j
+			local y = y_work[at]
+			local cr = cr_work[at] - 128 -- :/ Just undoes the previous shift...
+			local cb = cb_work[at] - 128
+		--	local r = floor(cr * (2 - 2 * .299) + y)
+		--	local b = floor(cb * (2 - 2 * .114) + y)
+		--	local g = floor((y - .114 * b - .299 * r) / .587)
+			local r = floor(y + 1.402 * cr)
+			local g = floor(y - .344136 * cb - .714136 * cr)
+			local b = floor(y + 1.772 * cb)
 
-		data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4], pos = r, g, b, 1, pos + 4
+			data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4], pos = r, g, b, 255, pos + 4
+		end
+
+		base = base + 64
 	end
-
-	return pos
 end
 
 --
@@ -540,21 +548,32 @@ local tt=oc()
 			local hcells, vcells = state.hmax * 8, state.vmax * 8
 
 			-- Work out indexing...
-			local pos = 0
+			local ybase, xstep, ystep, rowstep = 0, 4 * hcells, 4 * w * vcells, 4 * w
+			local cstep = 2 * xstep
 
 			for y1 = 1, h, vcells do
-				local y2 = min(y1 + vcells - 1, h)
+				local xbase, y2 = ybase, min(y1 + vcells - 1, h)
 
 				for x1 = 1, w, hcells do
 					ProcessMCU(get_bits, scan_info, shift, cmax, reader_op, yfunc)
 
 					local cbase, x2 = 0, min(x1 + hcells - 1, w)
-					local run = x2 - x1 + 1
+					local pos, run, from = xbase, x2 - x1 + 1, 1
 
 					for _ = y1, y2 do
-						pos, cbase = synth(pixels, pos, scan_info, cbase, run), cbase + hcells
+						synth(pixels, pos, scan_info, cbase, run, from)
+
+						pos, from = pos + rowstep, from + 8
+
+						if from == 64 then
+							cbase, from = cbase + cstep, 1
+						end
 					end
+
+					xbase = xbase + xstep
 				end
+
+				ybase = ybase + ystep
 			end
 
 			next_pos = reader_op("get_pos_rounded_up")
