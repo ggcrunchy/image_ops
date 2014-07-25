@@ -247,12 +247,23 @@ local Dequant = {}
 local pmcu_t,pmcu_n=0,0
 local entropy_t,entropy_n=0,0
 local idct_t,idct_n=0,0
-local kk, kn=0,0
+
 -- --
 local QU = {}
 
 --
-local function ProcessMCU (get_bits, scan_info, shift, reader_op, yfunc)
+local function Scale (work, amount, scale)
+	local index = amount + 1
+
+	for _ = 2, scale do
+		for i = 1, amount do
+			work[index], index = work[i], index + 1
+		end
+	end
+end
+
+--
+local function ProcessMCU (get_bits, scan_info, shift, cmax, reader_op, yfunc)
 local t0=oc()
 	--
 	local mcus_left, preds = scan_info.left, scan_info.preds
@@ -272,125 +283,137 @@ local t0=oc()
 
 	--
 	for i, scan in ipairs(scan_info) do
-		local dht, aht, qt, hsf, work, wpos = scan.dht, scan.aht, scan.qt, scan.hsf, scan.work, 1
+		local dht, aht, qt, work, wpos = scan.dht, scan.aht, scan.qt, scan.work, 1
+		local scalex, scaley, dcol, dline = scan.scalex, scan.scaley, scan.du_column, scan.du_line
 
-		for y = 1, scan.vsf do
-			for x = 1, hsf do
+		for _ = 1, scan.nunits do
 local tt=oc()
-				--
-				local s = Decode(get_bits, dht)
-				local extra, r = s % 16, 0
+			--
+			local s = Decode(get_bits, dht)
+			local extra, r = s % 16, 0
 
-				if extra > 0 then
-					r = get_bits(0, extra)
-				end
+			if extra > 0 then
+				r = get_bits(0, extra)
+			end
 
-				preds[i] = preds[i] + Extend(r, s)
+			preds[i] = preds[i] + Extend(r, s)
 
-				--
-				local k, size = 1, 64
+			--
+			local k, size = 1, 64
 
-				while k < 64 do
-					local zb = Decode(get_bits, aht)
+			while k < 64 do
+				local zb = Decode(get_bits, aht)
 
-					if zb > 0 then
-						if zb < 16 then
-							ZZ[k], k = Extend(get_bits(0, zb), zb), k + 1
-						elseif zb ~= 0xF0 then
-							local nzeroes, nbits = Nybbles(zb)
+				if zb > 0 then
+					if zb < 16 then
+						ZZ[k], k = Extend(get_bits(0, zb), zb), k + 1
+					elseif zb ~= 0xF0 then
+						local nzeroes, nbits = Nybbles(zb)
 
-							k = FillZeroes(k, nzeroes)
-							ZZ[k], k = Extend(get_bits(0, nbits), nbits), k + 1
-						else
-							k = FillZeroes(k, 16)
-						end
+						k = FillZeroes(k, nzeroes)
+						ZZ[k], k = Extend(get_bits(0, nbits), nbits), k + 1
 					else
-						local kp7 = k + 7
-
-						size = kp7 - kp7 % 8
-
-					--	FillZeroes(zz, k, size - k)
-
-						break
+						k = FillZeroes(k, 16)
 					end
+				else
+					local kp7 = k + 7
+
+					size = kp7 - kp7 % 8
+
+				--	FillZeroes(zz, k, size - k)
+
+					break
 				end
+			end
 entropy_t,entropy_n=entropy_t+oc()-tt,entropy_n+1
-				--
-				Dequant[1] = preds[i] * qt[1]
+			--
+			Dequant[1] = preds[i] * qt[1]
 
-				-- for j = 1, 64 * 64, 64 ?
-				--		pqt * Sqrt2_2
-				-- Row1.limit = 1 (or 8?)
+			-- for j = 1, 64 * 64, 64 ?
+			--		pqt * Sqrt2_2
+			-- Row1.limit = 1 (or 8?)
 
-				for j = 2, k do--size do
-					local at, dq = Zagzig[j], qt[j] * ZZ[j - 1]
+			for j = 2, k do--size do
+				local at, dq = Zagzig[j], qt[j] * ZZ[j - 1]
 
-					Dequant[at] = dq
-				end
-kk,kn=kk+k,kn+1
-				for j = k--[[size]] + 1, 64 do
-					Dequant[Zagzig[j]] = 0
-				end
+				Dequant[at] = dq
+			end
 
-				-- ^^^ Possible way to precalculate in the cos coefficients:
-				-- Zigzag[j] refers to first of 8 values in Dequant (with spacing of... 64? would then require no changes...)
-				-- Do `% 8`, etc. on result to figure out row, column (alternatively, step the zagzig algorithmically)
-				-- If in first column (including DC) multiply by Sqrt2_2 each
-				-- Else multiply by Cos[u + col - 1], Cos[u + col + 8 - 1], ...
-				-- Lookups in below step would be far fewer
-				-- If matrices typically sparse, ought to incur FAR fewer multiplications and lookups overall
-				-- Problem: naive approach might waste a lot of effort zeroing Dequant
-				-- Idea: Keep "largest column" per row, zero until previous limit
-				-- Since only used in next step, can assume further elements are 0 (even across components and MCU's)
-				-- ^^ Observed non-zeroes (out of 64): simple image = avg of 21.93; complex image = 39.79
+			for j = k--[[size]] + 1, 64 do
+				Dequant[Zagzig[j]] = 0
+			end
+
+			-- ^^^ Possible way to precalculate in the cos coefficients:
+			-- Zigzag[j] refers to first of 8 values in Dequant (with spacing of... 64? would then require no changes...)
+			-- Do `% 8`, etc. on result to figure out row, column (alternatively, step the zagzig algorithmically)
+			-- If in first column (including DC) multiply by Sqrt2_2 each
+			-- Else multiply by Cos[u + col - 1], Cos[u + col + 8 - 1], ...
+			-- Lookups in below step would be far fewer
+			-- If matrices typically sparse, ought to incur FAR fewer multiplications and lookups overall
+			-- Problem: naive approach might waste a lot of effort zeroing Dequant
+			-- Idea: Keep "largest column" per row, zero until previous limit
+			-- Since only used in next step, can assume further elements are 0 (even across components and MCU's)
+			-- ^^ Observed non-zeroes (out of 64): simple image = avg of 21.93; complex image = 39.79
 local tb=oc()
-				--
-				local qi = 1
+			--
+			local qi = 1
+
+			for u = 1, 64, 8 do
+				local a, b, c, d, e, f, g = Cos[u + 1], Cos[u + 2], Cos[u + 3], Cos[u + 4], Cos[u + 5], Cos[u + 6], Cos[u + 7]
+
+				for j = 1, 64, 8 do
+					QU[qi], qi = Dequant[j] * Sqrt2_2 +
+						a * Dequant[j + 1] +
+						b * Dequant[j + 2] +
+						c * Dequant[j + 3] +
+						d * Dequant[j + 4] +
+						e * Dequant[j + 5] +
+						f * Dequant[j + 6] +
+						g * Dequant[j + 7], qi + 1
+				end
+
+				QU[u] = QU[u] * Sqrt2_2 + shift
+			end
+
+			--
+			local up_to = wpos + 64
+
+			for v = 1, size, 8 do
+				local a, b, c, d, e, f, g = Cos[v + 1], Cos[v + 2], Cos[v + 3], Cos[v + 4], Cos[v + 5], Cos[v + 6], Cos[v + 7]
 
 				for u = 1, 64, 8 do
-					local a, b, c, d, e, f, g = Cos[u + 1], Cos[u + 2], Cos[u + 3], Cos[u + 4], Cos[u + 5], Cos[u + 6], Cos[u + 7]
+					local sum = QU[u] +
+						a * QU[u + 1] +
+						b * QU[u + 2] +
+						c * QU[u + 3] +
+						d * QU[u + 4] +
+						e * QU[u + 5] +
+						f * QU[u + 6] +
+						g * QU[u + 7]
 
-					for j = 1, 64, 8 do
-						QU[qi], qi = Dequant[j] * Sqrt2_2 +
-							a * Dequant[j + 1] +
-							b * Dequant[j + 2] +
-							c * Dequant[j + 3] +
-							d * Dequant[j + 4] +
-							e * Dequant[j + 5] +
-							f * Dequant[j + 6] +
-							g * Dequant[j + 7], qi + 1
-					end
-
-					QU[u] = QU[u] * Sqrt2_2 + shift
+					work[wpos], wpos = min(max(0, sum), cmax), wpos + 1
 				end
+			end
 
-				--
-				local up_to = wpos + 64
-
-				for v = 1, size, 8 do
-					local a, b, c, d, e, f, g = Cos[v + 1], Cos[v + 2], Cos[v + 3], Cos[v + 4], Cos[v + 5], Cos[v + 6], Cos[v + 7]
- 
-					for u = 1, 64, 8 do
-						work[wpos], wpos = QU[u] +
-							a * QU[u + 1] +
-							b * QU[u + 2] +
-							c * QU[u + 3] +
-							d * QU[u + 4] +
-							e * QU[u + 5] +
-							f * QU[u + 6] +
-							g * QU[u + 7], wpos + 1
-					end
-				end
-
-				--
-				while wpos < up_to do
-					work[wpos], wpos = 0, wpos + 1
-				end
+			--
+			while wpos < up_to do
+				work[wpos], wpos = 0, wpos + 1
+			end
 
 idct_t,idct_n=idct_t+oc()-tb,idct_n+1
-				-- Add component to block, scale, etc.
-				-- PutAtPos(zz, ...)
-			end
+		end
+
+		yfunc()
+
+		--
+		if scalex then
+			Scale(work, dcol, scalex)
+
+			yfunc()
+		end
+
+		if scaley then
+			Scale(work, dline, scaley)
 
 			yfunc()
 		end
@@ -402,21 +425,19 @@ end
 local Synth = {}
 
 --
-function Synth.YCbCr8 (data, pos, scan_info, base, run, step)
+function Synth.YCbCr (data, pos, scan_info, base, run)
 	local y_work, cb_work, cr_work = scan_info[1].work, scan_info[2].work, scan_info[3].work
 
 	for i = base + 1, base + run do
-		local y = min(max(0, y_work[i]), 255)
-		local cb = min(max(0, cb_work[i]), 255)
-		local cr = min(max(0, cr_work[i]), 255)
-		local r = floor(cr * (2 - 2 * .299) + y) + 128
-		local b = floor(cb * (2 - 2 * .114) + y) + 128
+		local y = y_work[i]
+		local r = floor(cr_work[i] * (2 - 2 * .299) + y) + 128
+		local b = floor(cb_work[i] * (2 - 2 * .114) + y) + 128
 		local g = floor((y - .114 * b - .299 * r) / .587) + 128
 
-		data[pos], data[pos + 1], data[pos + 2], data[pos + 3] = r, g, b, 1
-
-		pos = pos + step
+		data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4], pos = r, g, b, 1, pos + 4
 	end
+
+	return pos
 end
 
 --
@@ -429,19 +450,18 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, res
 		for _, scomp in ipairs(state) do
 			if comp == scomp.id then
 				local di, ai = Nybbles(byte(jpeg, from + 2))
+				local hsf, vsf = scomp.horz_samp_factor, scomp.vert_samp_factor
+				local scalex, scaley = state.hmax / hsf, state.vmax / vsf
 
 				scan_info[i], preds[i] = {
-					hsf = scomp.horz_samp_factor, vsf = scomp.vert_samp_factor,
+					nunits = hsf * vsf,
+					scalex = scalex > 1 and scalex, du_column = hsf * 64,
+					scaley = scaley > 1 and scaley, du_line = vsf * 64 * state.hmax,
 					dht = dhtables[di + 1], aht = ahtables[ai + 1],
 					qt = qtables[scomp.quantization_table + 1],
 					work = {}
 				}, 0
-				-- TODO: hreps, vreps
----[[
-for j = 1, 400 do
-	scan_info[i].work[j]=0
-end
---]]
+
 				break
 			end
 		end
@@ -452,7 +472,7 @@ end
 	--
 	scan_info.preds = preds
 
-	return scan_info, assert(Synth[synth .. state.nbits], "No synthesize method available")
+	return scan_info, assert(Synth[synth], "No synthesize method available")
 end
 
 -- Default yield function: no-op
@@ -512,7 +532,7 @@ local tt=oc()
 			pixels = pixels or {}
 
 			--
-			local n, shift = byte(jpeg, from), 2^(state.nbits - 1)
+			local n, shift, cmax = byte(jpeg, from), 2^(state.nbits - 1), 2^state.nbits - 1
 			local scan_info, synth = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
 
 			--
@@ -520,21 +540,19 @@ local tt=oc()
 			local hcells, vcells = state.hmax * 8, state.vmax * 8
 
 			-- Work out indexing...
-			local ybase, xstep, ystep = 0, 4 * hcells, 4 * w
+			local pos = 0
 
 			for y1 = 1, h, vcells do
 				local y2 = min(y1 + vcells - 1, h)
 
 				for x1 = 1, w, hcells do
-					ProcessMCU(get_bits, scan_info, shift, reader_op, yfunc)
+					ProcessMCU(get_bits, scan_info, shift, cmax, reader_op, yfunc)
 
-					local cbase, x2 = 1, min(x1 + hcells - 1, w)
+					local cbase, x2 = 0, min(x1 + hcells - 1, w)
 					local run = x2 - x1 + 1
 
 					for _ = y1, y2 do
-						synth(pixels, ybase, scan_info, cbase, run, xstep)
-
-						cbase, ybase = cbase + hcells, ybase + ystep
+						pos, cbase = synth(pixels, pos, scan_info, cbase, run), cbase + hcells
 					end
 				end
 			end
@@ -563,7 +581,6 @@ print("TOTAL", oc()-tt)
 print("MCU", pmcu_t, pmcu_t / pmcu_n)
 print("   ENTROPY", entropy_t, entropy_t / entropy_n)
 print("   IDCT", idct_t, idct_t / idct_n)
-print("Average occupancy", kk / kn)
 	--
 	local JPEG = {}
 
