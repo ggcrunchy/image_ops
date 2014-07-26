@@ -424,7 +424,13 @@ end
 
 --
 local function Int255 (comp)
-	return min(max(comp, 0), 255)
+	if comp < 0 then
+		return 0
+	elseif comp > 255 then
+		return 255
+	else
+		return floor(comp + .5)
+	end
 end
 
 -- --
@@ -442,7 +448,7 @@ function Synth.YCbCr255 (data, pos, scan_info, base, run, from)
 			local cb = cb_work[at] - 128
 
 			data[pos + 1] = Int255(y + 1.402 * cr)
-			data[pos + 2] = Int255(y - .344136 * cb - .714136 * cr)
+			data[pos + 2] = Int255(y - .34414 * cb - .71414 * cr)
 			data[pos + 3] = Int255(y + 1.772 * cb)
 			data[pos + 4] = 255
 
@@ -570,7 +576,7 @@ local tt=oc()
 
 						pos, from = pos + rowstep, from + 8
 
-						if from == 64 then
+						if from > 64 then
 							cbase, from = cbase + cstep, 1
 						end
 					end
