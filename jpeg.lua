@@ -123,10 +123,17 @@ local function OnByte (cur_byte, jpeg, pos)
 
 		if next_byte == 0x00 then
 			return pos + 1
-		elseif next_byte == 0xFF then
-			-- Fills, skip...
+		elseif next_byte == 0xFF then -- Needs testing!
+			pos = pos + 1
+
+			repeat
+				pos = pos + 1
+			until byte(jpeg, pos + 1) ~= 0xFF
+
+			return pos
 		else
-			-- Segment :(
+			-- Segment or repeat marker :(
+			-- Throw error? (If for recovery, OnByte needs to be pcall'd)
 		end
 	end
 end
@@ -263,7 +270,7 @@ local function Scale (work, amount, scale)
 end
 
 --
-local function ProcessMCU (get_bits, scan_info, shift, cmax, reader_op, yfunc)
+local function ProcessMCU (get_bits, scan_info, shift, reader_op, yfunc)
 local t0=oc()
 	--
 	local mcus_left, preds = scan_info.left, scan_info.preds
@@ -299,7 +306,7 @@ local tt=oc()
 			preds[i] = preds[i] + Extend(r, s)
 
 			--
-			local k, size = 1, 64
+			local k = 1
 
 			while k < 64 do
 				local zb = Decode(get_bits, aht)
@@ -316,12 +323,6 @@ local tt=oc()
 						k = FillZeroes(k, 16)
 					end
 				else
-					local kp7 = k + 7
-
-					size = kp7 - kp7 % 8
-
-				--	FillZeroes(k, size - k)
-
 					break
 				end
 			end
@@ -333,13 +334,13 @@ entropy_t,entropy_n=entropy_t+oc()-tt,entropy_n+1
 			--		pqt * Sqrt2_2
 			-- Row1.limit = 1 (or 8?)
 
-			for j = 2, k do--size do
+			for j = 2, k do
 				local at, dq = Zagzig[j], qt[j] * ZZ[j - 1]
 
 				Dequant[at] = dq
 			end
 
-			for j = k--[[size]] + 1, 64 do
+			for j = k + 1, 64 do
 				Dequant[Zagzig[j]] = 0
 			end
 
@@ -378,7 +379,7 @@ local tb=oc()
 			--
 			local up_to = wpos + 64
 
-			for v = 1, 64, 8 do--size, 8 do
+			for v = 1, 64, 8 do
 				local a, b, c, d, e, f, g = Cos[v + 1], Cos[v + 2], Cos[v + 3], Cos[v + 4], Cos[v + 5], Cos[v + 6], Cos[v + 7]
 
 				for u = 1, 64, 8 do
@@ -391,7 +392,7 @@ local tb=oc()
 						f * QU[u + 6] +
 						g * QU[u + 7]
 
-					work[wpos], wpos = min(max(0, sum), cmax), wpos + 1
+					work[wpos], wpos = sum, wpos + 1
 				end
 			end
 
@@ -421,11 +422,16 @@ idct_t,idct_n=idct_t+oc()-tb,idct_n+1
 pmcu_t,pmcu_n=pmcu_t+oc()-t0,pmcu_n+1
 end
 
+--
+local function Int255 (comp)
+	return min(max(comp, 0), 255)
+end
+
 -- --
 local Synth = {}
 
 --
-function Synth.YCbCr (data, pos, scan_info, base, run, from)
+function Synth.YCbCr255 (data, pos, scan_info, base, run, from)
 	local y_work, cb_work, cr_work = scan_info[1].work, scan_info[2].work, scan_info[3].work
 
 	for i = 1, run, 8 do
@@ -434,14 +440,13 @@ function Synth.YCbCr (data, pos, scan_info, base, run, from)
 			local y = y_work[at]
 			local cr = cr_work[at] - 128 -- :/ Just undoes the previous shift...
 			local cb = cb_work[at] - 128
-		--	local r = floor(cr * (2 - 2 * .299) + y)
-		--	local b = floor(cb * (2 - 2 * .114) + y)
-		--	local g = floor((y - .114 * b - .299 * r) / .587)
-			local r = floor(y + 1.402 * cr)
-			local g = floor(y - .344136 * cb - .714136 * cr)
-			local b = floor(y + 1.772 * cb)
 
-			data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4], pos = r, g, b, 255, pos + 4
+			data[pos + 1] = Int255(y + 1.402 * cr)
+			data[pos + 2] = Int255(y - .344136 * cb - .714136 * cr)
+			data[pos + 3] = Int255(y + 1.772 * cb)
+			data[pos + 4] = 255
+
+			pos = pos + 4
 		end
 
 		base = base + 64
@@ -480,7 +485,7 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, res
 	--
 	scan_info.preds = preds
 
-	return scan_info, assert(Synth[synth], "No synthesize method available")
+	return scan_info, assert(Synth[synth .. (2^state.nbits - 1)], "No synthesize method available")
 end
 
 -- Default yield function: no-op
@@ -540,7 +545,7 @@ local tt=oc()
 			pixels = pixels or {}
 
 			--
-			local n, shift, cmax = byte(jpeg, from), 2^(state.nbits - 1), 2^state.nbits - 1
+			local n, shift = byte(jpeg, from), 2^(state.nbits - 1)
 			local scan_info, synth = SetupScan(jpeg, from, state, dhtables, ahtables, qtables, n, restart)
 
 			--
@@ -555,7 +560,7 @@ local tt=oc()
 				local xbase, y2 = ybase, min(y1 + vcells - 1, h)
 
 				for x1 = 1, w, hcells do
-					ProcessMCU(get_bits, scan_info, shift, cmax, reader_op, yfunc)
+					ProcessMCU(get_bits, scan_info, shift, reader_op, yfunc)
 
 					local cbase, x2 = 0, min(x1 + hcells - 1, w)
 					local pos, run, from = xbase, x2 - x1 + 1, 1
