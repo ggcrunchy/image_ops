@@ -258,13 +258,42 @@ local idct_t,idct_n=0,0
 -- --
 local QU = {}
 
---
-local function Scale (work, amount, scale)
-	local index = amount + 1
+-- --
+local Offset = { 1, 3, 5, 7, 1 + 64, 3 + 64, 5 + 64, 7 + 64 }
 
-	for _ = 2, scale do
-		for i = 1, amount do
-			work[index], index = work[i], index + 1
+--
+local function ScaleX2 (work, dcol) -- N.B. For now, assume width, height = 1...
+	local wpos = 2 * dcol
+
+	for rpos = dcol, 1, -8 do
+		for i = 0, 7 do
+			local sample, j = work[rpos - i], wpos - Offset[i + 1]
+
+			work[j], work[j + 1] = sample, sample
+		end
+
+		wpos = wpos - 8
+	end
+end
+
+-- --
+local Quarters = { 2, 1, 1.5, .5 }
+
+--
+local function ScaleY2 (work, dline, hcells) -- ditto
+	local rpos, quarter = dline, .25 * dline
+
+	for q = 1, 4 do
+		local wpos, rnext = Quarters[q] * dline, rpos - quarter
+
+		while rpos > rnext do
+			for i = 0, 7 do
+				local sample, j = work[rpos - i], wpos - i
+
+				work[j], work[j - 8] = sample, sample
+			end
+
+			rpos, wpos = rpos - 8, wpos - 16
 		end
 	end
 end
@@ -273,7 +302,7 @@ end
 local function ProcessMCU (get_bits, scan_info, shift, reader_op, yfunc)
 local t0=oc()
 	--
-	local mcus_left, preds = scan_info.left, scan_info.preds
+	local mcus_left, preds, hcells = scan_info.left, scan_info.preds, scan_info.hcells
 
 	if mcus_left == 0 then
 		reader_op("round_up")
@@ -394,11 +423,9 @@ local tb=oc()
 
 					work[wpos], wpos = sum, wpos + 1
 				end
-			end
 
-			--
-			while wpos < up_to do
-				work[wpos], wpos = 0, wpos + 1
+				-- wpos = wpos + stride? (put into a more natural order...)
+				-- Then again, only cb, cr show problems... :/
 			end
 
 idct_t,idct_n=idct_t+oc()-tb,idct_n+1
@@ -408,13 +435,21 @@ idct_t,idct_n=idct_t+oc()-tb,idct_n+1
 
 		--
 		if scalex then
-			Scale(work, dcol, scalex)
+			if scalex == 2 then
+				ScaleX2(work, dcol, hcells)
+			else
+				--
+			end
 
 			yfunc()
 		end
 
 		if scaley then
-			Scale(work, dline, scaley)
+			if scaley == 2 then
+				ScaleY2(work, dline, hcells)
+			else
+				--
+			end
 
 			yfunc()
 		end
@@ -489,7 +524,7 @@ local function SetupScan (jpeg, from, state, dhtables, ahtables, qtables, n, res
 	end
 
 	--
-	scan_info.preds = preds
+	scan_info.preds, scan_info.hcells, scan_info.vcells = preds, state.hmax * 8, state.vmax * 8
 
 	return scan_info, assert(Synth[synth .. (2^state.nbits - 1)], "No synthesize method available")
 end
@@ -556,7 +591,7 @@ local tt=oc()
 
 			--
 			local get_bits, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
-			local hcells, vcells = state.hmax * 8, state.vmax * 8
+			local hcells, vcells = scan_info.hcells, scan_info.vcells
 
 			-- Work out indexing...
 			local ybase, xstep, ystep, rowstep = 0, 4 * hcells, 4 * w * vcells, 4 * w
