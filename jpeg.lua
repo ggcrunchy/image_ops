@@ -34,6 +34,7 @@ local min = math.min
 local sub = string.sub
 
 -- Modules --
+local huffman = require("image_ops.huffman")
 local image_utils = require("image_ops.utils")
 local operators = require("bitwise_ops.operators")
 
@@ -160,29 +161,6 @@ local function Extend (v, t)
 	end
 
 	return v
-end
-
---
-local function DHT (jpeg, from)
-	local ht, spos, code, prev = {}, from + 17, 0, 0
-
-	for i = 1, 16 do
-		local n = byte(jpeg, from + i)
-
-		if n > 0 then
-			local symbols = { nbits = i - prev, offset = code - 1, beyond = code + n }
-
-			for j = 1, n do
-				symbols[j], spos = byte(jpeg, spos), spos + 1
-			end
-
-			ht[#ht + 1], code, prev = symbols, code + n, i
-		end
-
-		code = 2 * code
-	end
-
-	return ht, spos
 end
 
 --
@@ -425,7 +403,7 @@ local tb=oc()
 				end
 
 				-- wpos = wpos + stride? (put into a more natural order...)
-				-- Then again, only cb, cr show problems... :/
+				-- Then ScaleX2 and ScaleY2 wouldn't be so crazy
 			end
 
 idct_t,idct_n=idct_t+oc()-tb,idct_n+1
@@ -570,7 +548,7 @@ local tt=oc()
 		-- Define Huffman Table --
 		elseif code == 0xC4 then
 			repeat
-				local hbyte, ht, spos = byte(jpeg, from), DHT(jpeg, from)
+				local hbyte, ht, spos = byte(jpeg, from), huffman.DecodeCompactByteStream(jpeg, from, 16)
 
 				if hbyte >= 16 then
 					ahtables[hbyte - 15] = ht
@@ -593,7 +571,7 @@ local tt=oc()
 			local get_bits, reader_op = image_utils.BitReader(jpeg, from + 2 * n + 4, OnByte, true)
 			local hcells, vcells = scan_info.hcells, scan_info.vcells
 
-			-- Work out indexing...
+			-- 
 			local ybase, xstep, ystep, rowstep = 0, 4 * hcells, 4 * w * vcells, 4 * w
 			local cstep = 2 * xstep
 
@@ -615,6 +593,8 @@ local tt=oc()
 							cbase, from = cbase + cstep, 1
 						end
 					end
+
+					yfunc()
 
 					xbase = xbase + xstep
 				end
@@ -651,29 +631,21 @@ print("   IDCT", idct_t, idct_t / idct_n)
 
 	--- DOCME
 	function JPEG:ForEach (func, arg)
-	--	pixels = pixels or Synthesize()
-
 		image_utils.ForEach(pixels, w, h, func, nil, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEach_OnRow (func, on_row, arg)
-	--	pixels = pixels or Synthesize()
-
 		image_utils.ForEach(pixels, w, h, func, on_row, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEachInColumn (func, col, arg)
-	--	pixels = pixels or Synthesize()
-
 		image_utils.ForEachInColumn(pixels, w, h, func, col, arg)
 	end
 
 	--- DOCME
 	function JPEG:ForEachInRow (func, row, arg)
-	--	pixels = pixels or Synthesize()
-
 		image_utils.ForEachInRow(pixels, w, func, row, arg)
 	end
 
@@ -684,8 +656,6 @@ print("   IDCT", idct_t, idct_t / idct_n)
 
 	--- DOCME
 	function JPEG:GetPixels ()
-	--	pixels = pixels or Decode()
-
 		return pixels
 	end
 

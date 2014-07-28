@@ -37,10 +37,34 @@ From the original (in zlib):
 ]]
 
 -- Standard library imports --
+local byte = string.byte
 local max = math.max
 
 -- Exports --
 local M = {}
+
+--- DOCME
+function M.DecodeCompactByteStream (stream, from, max_bits)
+	local ht, spos, code, prev = {}, from + max_bits + 1, 0, 0
+
+	for i = 1, max_bits do
+		local n = byte(stream, from + i)
+
+		if n > 0 then
+			local symbols = { nbits = i - prev, offset = code - 1, beyond = code + n }
+
+			for j = 1, n do
+				symbols[j], spos = byte(stream, spos), spos + 1
+			end
+
+			ht[#ht + 1], code, prev = symbols, code + n, i
+		end
+
+		code = 2 * code
+	end
+
+	return ht, spos
+end
 
 -- --
 local Lengths = {}
